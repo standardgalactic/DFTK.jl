@@ -33,12 +33,48 @@ function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext,
     end
 
     curv = dVol*(-dot(δV, δρ) + dot(δρ, Kδρ))
-    curv = abs(curv)  # Not sure we should explicitly do this
+    # curv = abs(curv)  # Not sure we should explicitly do this
 
     # E = slope * t + 1/2 curv * t^2
     αopt = -slope/curv
 
     αopt, slope, curv
+end
+
+function anderson()
+    Vs = []
+    δFs = []
+
+    function get_next(basis, V, δF)
+        model = basis.model
+        n_spin = model.n_spin_components
+
+        # generate new direction δV from history
+        function weight(dV)  # Precondition with Kerker
+            dVr = copy(reshape(dV, basis.fft_size..., n_spin))
+            Gsq = [sum(abs2, model.recip_lattice * G) for G in G_vectors(basis)]
+            w = (Gsq .+ 1) ./ (Gsq)
+            w[1] = 1
+            # for σ in 1:n_spin
+            #     dVr[:, :, :, σ] = from_fourier(basis, w .* from_real(basis, dVr[:, :, :, σ]).fourier).real
+            # end
+            dV
+        end
+        δV = δF
+        if !isempty(Vs)
+            mat = hcat(δFs...) .- vec(δF)
+            mat = mapslices(weight, mat; dims=[1])
+            alphas = -mat \ weight(vec(δF))
+            # alphas = -(mat'mat) * mat' * vec(δF)
+            for iα = 1:length(Vs)
+                δV += reshape(alphas[iα] * (Vs[iα] + δFs[iα] - vec(V) - vec(δF)), basis.fft_size..., n_spin)
+            end
+        end
+        push!(Vs, vec(V))
+        push!(δFs, vec(δF))
+
+        δV
+    end
 end
 
 @timing function potential_mixing(basis::PlaneWaveBasis;
@@ -78,19 +114,16 @@ end
     ρ_spin_out = ρspin
 
     _, ham = energy_hamiltonian(ρ.basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
-    V0 = cat(total_local_potential(ham)..., dims=4)
-
-    V = V0
-    Vprev = V
-    α = 1.0
+    V = cat(total_local_potential(ham)..., dims=4)
 
     dVol = model.unit_cell_volume / prod(basis.fft_size)
 
-    function EρV(V)
+    function EρV(V; diagtol=tol / 10)
         Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
         ham_V = hamiltonian_with_total_potential(ham, Vunpack)
         res_V = next_density(ham_V; n_bands=n_bands,
-                             ψ=ψ, n_ep_extra=3, miniter=1, tol=tol / 10)
+                             ψ=ψ, n_ep_extra=3, miniter=1, tol=diagtol)
+        # println("    n_iter = ", mean(res_V.diagonalization.iterations))
         new_E, new_ham = energy_hamiltonian(basis, res_V.ψ, res_V.occupation;
                                             ρ=res_V.ρout, ρspin=res_V.ρ_spin_out,
                                             eigenvalues=res_V.eigenvalues, εF=res_V.εF)
@@ -99,70 +132,80 @@ end
         new_E.total, res_V.ρout, res_V.ρ_spin_out, total_local_potential(new_ham)
     end
 
-    Vs = []
-    δFs = []
+    optimal_damping = false  # always optimal damping?
+    δF = nothing
+    α  = nothing  # nothing means that optimal damping will be determined in the first step
+    αmax = 2
+    V_prev = V
+    ρ_prev = ρ
+    ρ_spin_prev = ρspin
+    info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
+    diagtol = determine_diagtol(info)
+
+    get_next = anderson()
     Eprev = Inf
     for i = 1:maxiter
-        E, ρout, ρ_spin_out, GV = EρV(V)
-        GV = cat(GV..., dims=4)
-        println("ΔE this step:         = ", E - Eprev)
-        if !isnothing(ρ_spin_out)
-            println("Magnet                  ", sum(ρ_spin_out.real) * dVol)
-        end
-        Eprev = E
-        δF = GV - V
+        # println("   diagtol = $diagtol")
+        E, ρout, ρ_spin_out, Vout = EρV(V; diagtol=diagtol)
+        Vout = cat(Vout..., dims=4)
 
-        # generate new direction δV from history
-        function weight(dV)  # Precondition with Kerker
-            dVr = copy(reshape(dV, basis.fft_size..., n_spin))
-            Gsq = [sum(abs2, model.recip_lattice * G) for G in G_vectors(basis)]
-            w = (Gsq .+ 1) ./ (Gsq)
-            w[1] = 1
-            # for σ in 1:n_spin
-            #     dVr[:, :, :, σ] = from_fourier(basis, w .* from_real(basis, dVr[:, :, :, σ]).fourier).real
-            # end
-            dV
-        end
-        δV = δF
-        if !isempty(Vs)
-            mat = hcat(δFs...) .- vec(δF)
-            mat = mapslices(weight, mat; dims=[1])
-            alphas = -mat \ weight(vec(δF))
-            # alphas = -(mat'mat) * mat' * vec(δF)
-            for iα = 1:length(Vs)
-                δV += reshape(alphas[iα] * (Vs[iα] + δFs[iα] - vec(V) - vec(δF)), basis.fft_size..., n_spin)
-            end
-        end
-        push!(Vs, vec(V))
-        push!(δFs, vec(δF))
+        # Horrible mapping to the density-based SCF to use this function
+        info = (ρin=ρ_prev, ρnext=ρout, n_iter=i + 1)
+        diagtol = determine_diagtol(info)
 
-        # The SCF step
-        new_V = V + δV
-
-        # Optimal step size
-        new_E, ρnext, ρ_spin_next, _ = EρV(new_V)
-
-        ΔE = new_E - E
+        ΔE = E - Eprev
         abs(ΔE) < tol && break
 
-        αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext, ρ_spin_next)
-
         println("Step $i")
-        println("rel curv: ", curv / (dVol*dot(δV, δV)))
+        println("    ΔE           = ", ΔE, "     E = ", E)
+        if !isnothing(ρ_spin_out)
+            println("    Magnet       = ", sum(ρ_spin_out.real) * dVol)
+        end
+        if i > 1
+            # Use the δF and δV from the previous iteration
+            # (i.e. the one which got us to V) to determine a damping for the next step.
+            δV_prev = V - V_prev
+            α, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
+                                                        ρ_prev, ρ_spin_prev,
+                                                        ρout, ρ_spin_out)
+            α = min(α, αmax)
+            println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
 
-        # E = slope * t + 1/2 curv * t^2
-        # αopt = -slope/curv
-        ΔEopt = -1/2*slope^2 / curv
+            # E(α) = slope * α + ½ curv * α²
+            println("    predicted ΔE = ", slope + curv/2)
+            println("    α            = ", α)
+            println("    pred. damp ΔE= ", slope * α + curv * α^2 / 2)
 
-        println("SimpleSCF actual   ΔE = ", ΔE)
-        println("SimpleSCF pred     ΔE = ", slope + curv/2)
-        # println("Opt       actual      = ", EρV(V + αopt*(new_V - V))[1] - E)
-        println("Opt       pred     ΔE = ", ΔEopt)
-        println("αopt                  = ", αopt)
+            if ΔE > 0 && α > 0
+                println("    Rejecting step")  # TODO Also reject the ψ we stored!
+                println()
+                V = V_prev + α * δV_prev
+                continue  # Reject this step (but keep the update on α)
+            end
+        end
+
+        # Update state
+        Eprev = E
+        ρ_prev = ρout
+        ρ_spin_prev = ρ_spin_out
+        V_prev = V
+        δF = Vout - V_prev
+        δV = get_next(basis, V_prev, δF)
+
+        # Damped iteration / line search
+        if optimal_damping || isnothing(α) || α ≤ 0
+            println("    Solving for optimal damping")
+            _, ρnext, ρ_spin_next, _ = EρV(V + δV, diagtol=diagtol)
+            αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out,
+                                                           ρnext, ρ_spin_next)
+            println("    αopt         = ", αopt)
+            println("    opt. damp ΔE = ", slope * αopt + curv * αopt^2 / 2)
+
+            V = V + αopt * δV
+        else
+            V = V + α * δV
+        end
         println()
-
-        V = V + αopt*(new_V - V)
-        # V = V + (new_V - V)
     end
 
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
