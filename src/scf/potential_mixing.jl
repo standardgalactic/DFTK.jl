@@ -1,3 +1,46 @@
+# Change by implementing a heuristics that does the extra EρV only when needed.
+# Test it a bit
+# Refactor the code to be more in line with SCF
+
+function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext, ρ_spin_next)
+    # δF = F(V_out) - F(V_in)
+    # δV = V_next - V_in
+    # δρ = ρ(V_next) - ρ(V_in)
+    dVol = basis.model.unit_cell_volume / prod(basis.fft_size)
+    n_spin = basis.model.n_spin_components
+
+    δρ = (ρnext - ρout).real
+    if !isnothing(ρ_spin_out)
+        δρspin = (ρ_spin_next - ρ_spin_out).real
+        δρ_RFA     = from_real(basis, δρ)
+        δρspin_RFA = from_real(basis, δρspin)
+
+        δρα = (δρ + δρspin) / 2
+        δρβ = (δρ - δρspin) / 2
+        δρ = cat(δρα, δρβ, dims=4)
+    else
+        δρ_RFA = from_real(basis, δρ)
+        δρspin_RFA = nothing
+        δρ = reshape(δρ, basis.fft_size..., 1)
+    end
+
+    slope = dVol * dot(δF, δρ)
+    Kδρ = apply_kernel(basis, δρ_RFA, δρspin_RFA; ρ=ρout, ρspin=ρ_spin_out)
+    if n_spin == 1
+        Kδρ = reshape(Kδρ[1].real, basis.fft_size..., 1)
+    else
+        Kδρ = cat(Kδρ[1].real, Kδρ[2].real, dims=4)
+    end
+
+    curv = dVol*(-dot(δV, δρ) + dot(δρ, Kδρ))
+    curv = abs(curv)  # Not sure we should explicitly do this
+
+    # E = slope * t + 1/2 curv * t^2
+    αopt = -slope/curv
+
+    αopt, slope, curv
+end
+
 @timing function potential_mixing(basis::PlaneWaveBasis;
                                   n_bands=default_n_bands(basis.model),
                                   ρ=guess_density(basis),
@@ -31,12 +74,15 @@
     energies = nothing
     ham = nothing
     n_spin = basis.model.n_spin_components
+    ρout = ρ
+    ρ_spin_out = ρspin
 
     _, ham = energy_hamiltonian(ρ.basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
     V0 = cat(total_local_potential(ham)..., dims=4)
 
     V = V0
     Vprev = V
+    α = 1.0
 
     dVol = model.unit_cell_volume / prod(basis.fft_size)
 
@@ -54,19 +100,19 @@
     end
 
     Vs = []
-    δVs = []
+    δFs = []
     Eprev = Inf
     for i = 1:maxiter
-        E, ρ, ρspin, GV = EρV(V)
+        E, ρout, ρ_spin_out, GV = EρV(V)
         GV = cat(GV..., dims=4)
         println("ΔE this step:         = ", E - Eprev)
-        if !isnothing(ρspin)
-            println("Magnet                  ", sum(ρspin.real) * dVol)
+        if !isnothing(ρ_spin_out)
+            println("Magnet                  ", sum(ρ_spin_out.real) * dVol)
         end
         Eprev = E
-        δV = GV - V
+        δF = GV - V
 
-        # generate new direction ΔV from history
+        # generate new direction δV from history
         function weight(dV)  # Precondition with Kerker
             dVr = copy(reshape(dV, basis.fft_size..., n_spin))
             Gsq = [sum(abs2, model.recip_lattice * G) for G in G_vectors(basis)]
@@ -77,74 +123,52 @@
             # end
             dV
         end
-        ΔV = δV
+        δV = δF
         if !isempty(Vs)
-            mat = hcat(δVs...) .- vec(δV)
+            mat = hcat(δFs...) .- vec(δF)
             mat = mapslices(weight, mat; dims=[1])
-            alphas = -mat \ weight(vec(δV))
-            # alphas = -(mat'mat) * mat' * vec(δV)
+            alphas = -mat \ weight(vec(δF))
+            # alphas = -(mat'mat) * mat' * vec(δF)
             for iα = 1:length(Vs)
-                ΔV += reshape(alphas[iα] * (Vs[iα] + δVs[iα] - vec(V) - vec(δV)), basis.fft_size..., n_spin)
+                δV += reshape(alphas[iα] * (Vs[iα] + δFs[iα] - vec(V) - vec(δF)), basis.fft_size..., n_spin)
             end
         end
         push!(Vs, vec(V))
-        push!(δVs, vec(δV))
+        push!(δFs, vec(δF))
 
-        # actual step
-        # ΔV = δV
-        new_V = V + ΔV
+        # The SCF step
+        new_V = V + δV
 
-        new_E, new_ρ, new_ρspin, _ = EρV(new_V)
+        # Optimal step size
+        new_E, ρnext, ρ_spin_next, _ = EρV(new_V)
 
         ΔE = new_E - E
         abs(ΔE) < tol && break
-        Δρ = (new_ρ - ρ).real
-        if !isnothing(ρspin)
-            Δρspin = (new_ρspin - ρspin).real
-            Δρ_RFA     = from_real(basis, Δρ)
-            Δρspin_RFA = from_real(basis, Δρspin)
 
-            Δρα = (Δρ + Δρspin) / 2
-            Δρβ = (Δρ - Δρspin) / 2
-            Δρ = cat(Δρα, Δρβ, dims=4)
-        else
-            Δρ_RFA = from_real(basis, Δρ)
-            Δρspin_RFA = nothing
-            Δρ = reshape(Δρ, size(Δρ)..., 1)
-        end
+        αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext, ρ_spin_next)
 
         println("Step $i")
-        slope = dVol * dot(δV, Δρ)
-        KΔρ = apply_kernel(basis, Δρ_RFA, Δρspin_RFA; ρ=ρ, ρspin=ρspin)
-        if n_spin == 1
-            KΔρ = reshape(KΔρ[1].real, size(KΔρ[1].real)..., 1)
-        else
-            KΔρ = cat(KΔρ[1].real, KΔρ[2].real, dims=4)
-        end
-
-        curv = dVol*(-dot(ΔV, Δρ) + dot(Δρ, KΔρ))
-        println("rel curv: ", curv / (dVol*dot(ΔV, ΔV)))
-        curv = abs(curv)
+        println("rel curv: ", curv / (dVol*dot(δV, δV)))
 
         # E = slope * t + 1/2 curv * t^2
-        topt = -slope/curv
+        # αopt = -slope/curv
         ΔEopt = -1/2*slope^2 / curv
 
         println("SimpleSCF actual   ΔE = ", ΔE)
         println("SimpleSCF pred     ΔE = ", slope + curv/2)
-        # println("Opt       actual      = ", EρV(V + topt*(new_V - V))[1] - E)
+        # println("Opt       actual      = ", EρV(V + αopt*(new_V - V))[1] - E)
         println("Opt       pred     ΔE = ", ΔEopt)
-        println("topt                  = ", topt)
+        println("αopt                  = ", αopt)
         println()
 
-        V = V + topt*(new_V - V)
+        V = V + αopt*(new_V - V)
         # V = V + (new_V - V)
     end
 
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
     ham = hamiltonian_with_total_potential(ham, Vunpack)
     info = (ham=ham, basis=basis, energies=energies, converged=converged,
-            ρ=ρ, ρspin=ρspin, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+            ρ=ρout, ρspin=ρ_spin_out, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
             n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ)
     info
 end
