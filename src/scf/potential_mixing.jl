@@ -2,6 +2,8 @@
 # Test it a bit
 # Refactor the code to be more in line with SCF
 
+
+
 function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext, ρ_spin_next)
     # δF = F(V_out) - F(V_in)
     # δV = V_next - V_in
@@ -123,7 +125,7 @@ end
         ham_V = hamiltonian_with_total_potential(ham, Vunpack)
         res_V = next_density(ham_V; n_bands=n_bands,
                              ψ=ψ, n_ep_extra=3, miniter=1, tol=diagtol)
-        # println("    n_iter = ", mean(res_V.diagonalization.iterations))
+        println("    n_iter =       ", mean(res_V.diagonalization.iterations))
         new_E, new_ham = energy_hamiltonian(basis, res_V.ψ, res_V.occupation;
                                             ρ=res_V.ρout, ρspin=res_V.ρ_spin_out,
                                             eigenvalues=res_V.eigenvalues, εF=res_V.εF)
@@ -132,20 +134,21 @@ end
         new_E.total, res_V.ρout, res_V.ρ_spin_out, total_local_potential(new_ham)
     end
 
-    optimal_damping = false  # always optimal damping?
+    # New parameters:
+    α = 1.0  # Default damping
+
     δF = nothing
-    α  = nothing  # nothing means that optimal damping will be determined in the first step
-    αmax = 2
     V_prev = V
     ρ_prev = ρ
     ρ_spin_prev = ρspin
+    ΔE_prev = 0
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
 
     get_next = anderson()
     Eprev = Inf
     for i = 1:maxiter
-        # println("   diagtol = $diagtol")
+        println("Step $i")
         E, ρout, ρ_spin_out, Vout = EρV(V; diagtol=diagtol)
         Vout = cat(Vout..., dims=4)
 
@@ -154,58 +157,53 @@ end
         diagtol = determine_diagtol(info)
 
         ΔE = E - Eprev
+        println("    ΔE           = ", ΔE, "     E = ", E)
         abs(ΔE) < tol && break
 
-        println("Step $i")
-        println("    ΔE           = ", ΔE, "     E = ", E)
         if !isnothing(ρ_spin_out)
             println("    Magnet       = ", sum(ρ_spin_out.real) * dVol)
         end
-        if i > 1
-            # Use the δF and δV from the previous iteration
-            # (i.e. the one which got us to V) to determine a damping for the next step.
+
+        reject_step = ΔE > abs(ΔE_prev)
+        if reject_step && i > 1
+            # TODO Also reject the ψ we stored!
+            println("    Rejecting step")
+
+            # Determine optimal damping
             δV_prev = V - V_prev
-            α, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
-                                                        ρ_prev, ρ_spin_prev,
-                                                        ρout, ρ_spin_out)
-            α = min(α, αmax)
+            αstep, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
+                                                            ρ_prev, ρ_spin_prev,
+                                                            ρout, ρ_spin_out)
+
             println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
 
             # E(α) = slope * α + ½ curv * α²
             println("    predicted ΔE = ", slope + curv/2)
-            println("    α            = ", α)
-            println("    pred. damp ΔE= ", slope * α + curv * α^2 / 2)
+            println("    αopt         = ", αstep)
+            println("    pred. damp ΔE= ", slope * αstep + curv * αstep^2 / 2)
+            println()
 
-            if ΔE > 0 && α > 0
-                println("    Rejecting step")  # TODO Also reject the ψ we stored!
-                println()
-                V = V_prev + α * δV_prev
-                continue  # Reject this step (but keep the update on α)
-            end
+            V = V_prev + αstep * δV_prev
+            continue
+        else
+            αstep = α
+            println("    αstep        = ", αstep)
+            println()
         end
 
         # Update state
+        ΔE_prev = i == 1 ? 0 : ΔE
         Eprev = E
         ρ_prev = ρout
         ρ_spin_prev = ρ_spin_out
         V_prev = V
-        δF = Vout - V_prev
-        δV = get_next(basis, V_prev, δF)
+        δF = (Vout - V_prev)
 
-        # Damped iteration / line search
-        if optimal_damping || isnothing(α) || α ≤ 0
-            println("    Solving for optimal damping")
-            _, ρnext, ρ_spin_next, _ = EρV(V + δV, diagtol=diagtol)
-            αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out,
-                                                           ρnext, ρ_spin_next)
-            println("    αopt         = ", αopt)
-            println("    opt. damp ΔE = ", slope * αopt + curv * αopt^2 / 2)
+        # TODO The place to do mixing
+        Pinv_δF = αstep * δF
 
-            V = V + αopt * δV
-        else
-            V = V + α * δV
-        end
-        println()
+        # Update V
+        V = V + get_next(basis, V_prev, Pinv_δF)
     end
 
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
