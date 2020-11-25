@@ -1,6 +1,4 @@
-# Change by implementing a heuristics that does the extra EρV only when needed.
-# Test it a bit
-# Refactor the code to be more in line with SCF
+# TODO Refactor the code to be more in line with SCF
 
 
 
@@ -120,7 +118,7 @@ end
 
     dVol = model.unit_cell_volume / prod(basis.fft_size)
 
-    function EρV(V; diagtol=tol / 10)
+    function EVρ(V; diagtol=tol / 10)
         Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
         ham_V = hamiltonian_with_total_potential(ham, Vunpack)
         res_V = next_density(ham_V; n_bands=n_bands,
@@ -129,19 +127,16 @@ end
         new_E, new_ham = energy_hamiltonian(basis, res_V.ψ, res_V.occupation;
                                             ρ=res_V.ρout, ρspin=res_V.ρ_spin_out,
                                             eigenvalues=res_V.eigenvalues, εF=res_V.εF)
-        ψ = res_V.ψ
         # println(res_V.eigenvalues[1][5] - res_V.eigenvalues[1][4])
-        new_E.total, res_V.ρout, res_V.ρ_spin_out, total_local_potential(new_ham)
+        (energies=new_E, Vout=total_local_potential(new_ham), res_V...)
     end
 
-    # New parameters:
-    α = 1.0  # Default damping
-
+    α = mixing.α
     δF = nothing
     V_prev = V
     ρ_prev = ρ
     ρ_spin_prev = ρspin
-    ΔE_prev = 0
+    ΔE_prev_down = [zero(T)]
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
 
@@ -149,12 +144,13 @@ end
     Eprev = Inf
     for i = 1:maxiter
         println("Step $i")
-        E, ρout, ρ_spin_out, Vout = EρV(V; diagtol=diagtol)
+        nextstate = EVρ(V; diagtol=diagtol)
+        energies, Vout, ψout, eigenvalues, occupation, εF, ρout, ρ_spin_out = nextstate
+        E = energies.total
         Vout = cat(Vout..., dims=4)
 
         # Horrible mapping to the density-based SCF to use this function
-        info = (ρin=ρ_prev, ρnext=ρout, n_iter=i + 1)
-        diagtol = determine_diagtol(info)
+        diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
 
         ΔE = E - Eprev
         println("    ΔE           = ", ΔE, "     E = ", E)
@@ -164,9 +160,8 @@ end
             println("    Magnet       = ", sum(ρ_spin_out.real) * dVol)
         end
 
-        reject_step = ΔE > abs(ΔE_prev)
+        reject_step = ΔE > mean(abs.(ΔE_prev_down[max(begin, end-1):end]))
         if reject_step && i > 1
-            # TODO Also reject the ψ we stored!
             println("    Rejecting step")
 
             # Determine optimal damping
@@ -192,15 +187,19 @@ end
         end
 
         # Update state
-        ΔE_prev = i == 1 ? 0 : ΔE
+        ΔE < 0 && i > 1 && (push!(ΔE_prev_down, ΔE))
         Eprev = E
+        ψ = ψout
         ρ_prev = ρout
         ρ_spin_prev = ρ_spin_out
         V_prev = V
         δF = (Vout - V_prev)
 
-        # TODO The place to do mixing
-        Pinv_δF = αstep * δF
+        # TODO A bit hackish for now ...
+        #      ... the (αstep / mixing.α) is to get rid of the implicit α of the mixing
+        info = (ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+                ρout=ρout, ρ_spin_out=ρ_spin_out)
+        Pinv_δF = (αstep / mixing.α) * mix(mixing, basis, δF; info...)
 
         # Update V
         V = V + get_next(basis, V_prev, Pinv_δF)
