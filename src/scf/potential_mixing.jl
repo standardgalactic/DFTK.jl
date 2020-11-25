@@ -123,11 +123,9 @@ end
         ham_V = hamiltonian_with_total_potential(ham, Vunpack)
         res_V = next_density(ham_V; n_bands=n_bands,
                              ψ=ψ, n_ep_extra=3, miniter=1, tol=diagtol)
-        println("    n_iter =       ", mean(res_V.diagonalization.iterations))
         new_E, new_ham = energy_hamiltonian(basis, res_V.ψ, res_V.occupation;
                                             ρ=res_V.ρout, ρspin=res_V.ρ_spin_out,
                                             eigenvalues=res_V.eigenvalues, εF=res_V.εF)
-        # println(res_V.eigenvalues[1][5] - res_V.eigenvalues[1][4])
         (energies=new_E, Vout=total_local_potential(new_ham), res_V...)
     end
 
@@ -143,48 +141,43 @@ end
     get_next = anderson()
     Eprev = Inf
     for i = 1:maxiter
-        println("Step $i")
         nextstate = EVρ(V; diagtol=diagtol)
         energies, Vout, ψout, eigenvalues, occupation, εF, ρout, ρ_spin_out = nextstate
         E = energies.total
         Vout = cat(Vout..., dims=4)
 
-        # Horrible mapping to the density-based SCF to use this function
-        diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
-
         ΔE = E - Eprev
-        println("    ΔE           = ", ΔE, "     E = ", E)
         abs(ΔE) < tol && break
 
-        if !isnothing(ρ_spin_out)
-            println("    Magnet       = ", sum(ρ_spin_out.real) * dVol)
-        end
+        info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
+                ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+                ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
+                diagonalization=nextstate.diagonalization)
+        callback(info)
 
         reject_step = ΔE > mean(abs.(ΔE_prev_down[max(begin, end-1):end]))
         if reject_step && i > 1
-            println("    Rejecting step")
-
             # Determine optimal damping
             δV_prev = V - V_prev
             αstep, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
                                                             ρ_prev, ρ_spin_prev,
                                                             ρout, ρ_spin_out)
 
-            println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
-
             # E(α) = slope * α + ½ curv * α²
-            println("    predicted ΔE = ", slope + curv/2)
-            println("    αopt         = ", αstep)
-            println("    pred. damp ΔE= ", slope * αstep + curv * αstep^2 / 2)
+            # println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
+            println("      predicted E  = ", Eprev + slope + curv/2)
+            println("      αopt         = ", αstep)
+            println("      pred. αopt E = ", Eprev + slope * αstep + curv * αstep^2 / 2)
             println()
 
             V = V_prev + αstep * δV_prev
             continue
         else
             αstep = α
-            println("    αstep        = ", αstep)
-            println()
         end
+
+        # Horrible mapping to the density-based SCF to use this function
+        diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
 
         # Update state
         ΔE < 0 && i > 1 && (push!(ΔE_prev_down, ΔE))
@@ -194,6 +187,7 @@ end
         ρ_spin_prev = ρ_spin_out
         V_prev = V
         δF = (Vout - V_prev)
+
 
         # TODO A bit hackish for now ...
         #      ... the (αstep / mixing.α) is to get rid of the implicit α of the mixing
@@ -209,6 +203,7 @@ end
     ham = hamiltonian_with_total_potential(ham, Vunpack)
     info = (ham=ham, basis=basis, energies=energies, converged=converged,
             ρ=ρout, ρspin=ρ_spin_out, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-            n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ)
+            n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ, stage=:finalize)
+    callback(info)
     info
 end

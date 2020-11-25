@@ -33,7 +33,7 @@ function ScfDefaultCallback()
         ΔE     = prev_E == Inf ? "      NaN" : @sprintf "% 3.2e" E - prev_E
         Mstr = collinear ? "   $((@sprintf "%6.3f" round(magn, sigdigits=4))[1:6])" : ""
         diagiter = sum(info.diagonalization.iterations) / length(info.diagonalization.iterations)
-        @printf "% 3d   %s   %s   %2.2e%s   % 3.1f \n" info.n_iter Estr ΔE Δρ Mstr diagiter
+        @printf "% 3d   %s   %s   %2.2e%s  %5.1f \n" info.n_iter Estr ΔE Δρ Mstr diagiter
         prev_energies = info.energies
 
         flush(stdout)
