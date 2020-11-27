@@ -41,41 +41,126 @@ function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext,
     αopt, slope, curv
 end
 
-function anderson()
-    Vs = []
-    δFs = []
+function show_statistics(A)
+    λ, X = eigen(A)
+    idx = sortperm(λ, by=x -> abs(real(x)))[1:min(20, end)]
+    println()
+    @show λ[idx]
+    display(eigvecs(A)[:, idx])
+    println()
+end
 
-    function get_next(basis, V, δF)
-        model = basis.model
-        n_spin = model.n_spin_components
 
-        # generate new direction δV from history
-        function weight(dV)  # Precondition with Kerker
-            dVr = copy(reshape(dV, basis.fft_size..., n_spin))
-            Gsq = [sum(abs2, model.recip_lattice * G) for G in G_vectors(basis)]
-            w = (Gsq .+ 1) ./ (Gsq)
-            w[1] = 1
-            # for σ in 1:n_spin
-            #     dVr[:, :, :, σ] = from_fourier(basis, w .* from_real(basis, dVr[:, :, :, σ]).fourier).real
-            # end
-            dV
-        end
-        δV = δF
+function anderson(;m=Inf, mode=:diis)
+    # Fixed-point map  f(V)  = δF(V) = step(V) - V, where step(V) = (Vext + Vhxc(ρ(V)))
+    # SCF update       Pf(V) = α P⁻¹ f(V)
+    # SCF map          g(V)  = V + Pf(V)
+    #
+    # Finds the linear combination Vₙ₊₁ = g(Vₙ) + ∑ᵢ βᵢ (g(Vᵢ) - g(Vₙ))
+    # such that |Pf(Vₙ) + ∑ᵢ βᵢ (Pf(Vᵢ) - Pf(Vₙ))|² is minimal
+    #
+    Vs   = []  # The V     for each iteration
+    PfVs = []  # The Pf(V) for each iteration
+
+    function get_next(basis, ρₙ, ρspinₙ, Vₙ, PfVₙ)
+        n_spin = basis.model.n_spin_components
+
+        Vₙopt = copy(vec(Vₙ))
+        PfVₙopt = copy(vec(PfVₙ))
+        # Vₙ₊₁ = Vₙ + PfVₙ
+        A = nothing
         if !isempty(Vs)
-            mat = hcat(δFs...) .- vec(δF)
-            mat = mapslices(weight, mat; dims=[1])
-            alphas = -mat \ weight(vec(δF))
-            # alphas = -(mat'mat) * mat' * vec(δF)
-            for iα = 1:length(Vs)
-                δV += reshape(alphas[iα] * (Vs[iα] + δFs[iα] - vec(V) - vec(δF)), basis.fft_size..., n_spin)
+            M = hcat(PfVs...) .- vec(PfVₙ)  # Mᵢⱼ = (PfVⱼ)ᵢ - (PfVₙ)ᵢ
+            # We need to solve 0 = M' PfVₙ + M'M βs <=> βs = - (M'M)⁻¹ M' PfVₙ
+            βs = -M \ vec(PfVₙ)
+            show_statistics(M'M)
+            for (iβ, β) in enumerate(βs)
+                Vₙopt += β * (Vs[iβ] - vec(Vₙ))
+                PfVₙopt += β * (PfVs[iβ] - vec(PfVₙ))
+                # Vₙ₊₁ += reshape(β * (Vs[iβ] + PfVs[iβ] - vec(Vₙ) - vec(PfVₙ)),
+                #                 basis.fft_size..., n_spin)
             end
         end
-        push!(Vs, vec(V))
-        push!(δFs, vec(δF))
+        if mode == :crop
+            push!(Vs, vec(Vₙopt))
+            push!(PfVs, vec(PfVₙopt))
+        else
+            push!(Vs, vec(Vₙ))
+            push!(PfVs, vec(PfVₙ))
+        end
+        if length(Vs) > m
+            Vs = Vs[2:end]
+            PfVs = PfVs[2:end]
+        end
+        @assert length(Vs) <= m
 
-        δV
+        # Vₙ₊₁
+        reshape(Vₙopt + PfVₙopt, basis.fft_size..., n_spin)
     end
 end
+
+function anderson_rho(;m=Inf, mode=:diis)
+    # TODO Huge code duplication with anderson()
+    #
+    # Fixed-point map  f(V)  = δF(V) = step(V) - V, where step(V) = (Vext + Vhxc(ρ(V)))
+    # SCF update       Pf(V) = α P⁻¹ f(V)
+    # SCF map          g(V)  = V + Pf(V)
+    #
+    # Finds the linear combination Vₙ₊₁ = g(Vₙ) + ∑ᵢ βᵢ (g(Vᵢ) - g(Vₙ))
+    # such that (ρₙ - ρᵢ)^† [Pf(Vₙ) + ∑ᵢ βᵢ (Pf(Vᵢ) - Pf(Vₙ))] = 0
+    #
+    Vs   = []  # The V     for each iteration
+    ρs   = []  # The ρ used to build the V
+    PfVs = []  # The Pf(V) for each iteration
+
+    function get_next(basis, ρₙ, ρspinₙ, Vₙ, PfVₙ)
+        n_spin = basis.model.n_spin_components
+        @assert n_spin == 1
+        @assert ρspinₙ === nothing
+
+        ρₙ = reshape(ρₙ.real, basis.fft_size..., n_spin)
+        ρₙopt = copy(vec(ρₙ))
+        Vₙopt = copy(vec(Vₙ))
+        PfVₙopt = copy(vec(PfVₙ))
+        # Vₙ₊₁ = Vₙ + PfVₙ
+        if !isempty(Vs)
+            M = hcat(PfVs...) .- vec(PfVₙ)  # Mᵢⱼ = (PfVⱼ)ᵢ - (PfVₙ)ᵢ
+            P = hcat(ρs...) .- vec(ρₙ)      # Pᵢⱼ = (ρⱼ)ᵢ   - (ρₙ)ᵢ
+            # We need to solve P' PfVₙ + P'M βs = 0
+            rhs = - P'vec(PfVₙ)
+            A = P'M
+            show_statistics(A)
+            βs = real.(A \ rhs)
+            for (iβ, β) in enumerate(βs)
+                Vₙopt   += β * (Vs[iβ] - vec(Vₙ))
+                PfVₙopt += β * (PfVs[iβ] - vec(PfVₙ))
+                ρₙopt   += β * (ρs[iβ] - vec(ρₙ))
+                #Vₙ₊₁ += reshape(β * (Vs[iβ] + PfVs[iβ] - vec(Vₙ) - vec(PfVₙ)),
+                #                basis.fft_size..., n_spin)
+            end
+        end
+        if mode == :crop
+            error("Untested")
+            push!(ρs, vec(ρₙopt))  # TODO or ρₙ or sth else?
+            push!(Vs, vec(Vₙopt))
+            push!(PfVs, vec(PfVₙopt))
+        else
+            push!(ρs, vec(ρₙ))
+            push!(Vs, vec(Vₙ))
+            push!(PfVs, vec(PfVₙ))
+        end
+        if length(Vs) > m
+            Vs = Vs[2:end]
+            ρs = ρs[2:end]
+            PfVs = PfVs[2:end]
+        end
+        @assert length(Vs) <= m
+
+        # Vₙ₊₁
+        reshape(Vₙopt + PfVₙopt, basis.fft_size..., n_spin)
+    end
+end
+
 
 @timing function potential_mixing(basis::PlaneWaveBasis;
                                   n_bands=default_n_bands(basis.model),
@@ -137,8 +222,10 @@ end
     ΔE_prev_down = [zero(T)]
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
+    converged = false
 
-    get_next = anderson()
+    # get_next = anderson(m=10, mode=:crop)
+    get_next = anderson_rho(m=Inf, mode=:crop)
     Eprev = Inf
     for i = 1:maxiter
         nextstate = EVρ(V; diagtol=diagtol)
@@ -147,15 +234,18 @@ end
         Vout = cat(Vout..., dims=4)
 
         ΔE = E - Eprev
-        abs(ΔE) < tol && break
+        if abs(ΔE) < tol
+            converged = true
+            break
+        end
 
         info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
-                diagonalization=nextstate.diagonalization)
+                diagonalization=nextstate.diagonalization, converged=converged)
         callback(info)
 
-        reject_step = ΔE > mean(abs.(ΔE_prev_down[max(begin, end-1):end]))
+        reject_step = ΔE > 5mean(abs.(ΔE_prev_down[max(begin, end-1):end]))
         if reject_step && i > 1
             # Determine optimal damping
             δV_prev = V - V_prev
@@ -165,9 +255,10 @@ end
 
             # E(α) = slope * α + ½ curv * α²
             # println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
-            println("      predicted E  = ", Eprev + slope + curv/2)
+            println("      ΔE           = ", ΔE)
+            println("      predicted ΔE = ", slope + curv/2)
             println("      αopt         = ", αstep)
-            println("      pred. αopt E = ", Eprev + slope * αstep + curv * αstep^2 / 2)
+            println("      pred αopt ΔE = ", slope * αstep + curv * αstep^2 / 2)
             println()
 
             V = V_prev + αstep * δV_prev
@@ -185,18 +276,18 @@ end
         ψ = ψout
         ρ_prev = ρout
         ρ_spin_prev = ρ_spin_out
-        V_prev = V
-        δF = (Vout - V_prev)
+        δF = (Vout - V)
 
 
         # TODO A bit hackish for now ...
         #      ... the (αstep / mixing.α) is to get rid of the implicit α of the mixing
         info = (ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-                ρout=ρout, ρ_spin_out=ρ_spin_out)
+                ρout=ρout, ρ_spin_out=ρ_spin_out, n_iter=i)
         Pinv_δF = (αstep / mixing.α) * mix(mixing, basis, δF; info...)
 
         # Update V
-        V = V + get_next(basis, V_prev, Pinv_δF)
+        V_prev = V
+        V = get_next(basis, ρout, ρ_spin_out, V, Pinv_δF)
     end
 
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
