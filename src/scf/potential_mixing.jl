@@ -41,12 +41,14 @@ function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext,
     αopt, slope, curv
 end
 
-function show_statistics(A)
+function show_statistics(A, dVdV)
     λ, X = eigen(A)
+    λdV, XdV = eigen(A, dVdV)
     idx = sortperm(λ, by=x -> abs(real(x)))[1:min(20, end)]
     println()
     @show λ[idx]
-    display(eigvecs(A)[:, idx])
+    @show λdV
+    # display(eigvecs(A)[:, idx])
     println()
 end
 
@@ -73,7 +75,8 @@ function anderson(;m=Inf, mode=:diis)
             M = hcat(PfVs...) .- vec(PfVₙ)  # Mᵢⱼ = (PfVⱼ)ᵢ - (PfVₙ)ᵢ
             # We need to solve 0 = M' PfVₙ + M'M βs <=> βs = - (M'M)⁻¹ M' PfVₙ
             βs = -M \ vec(PfVₙ)
-            show_statistics(M'M)
+            dV = hcat(Vs...) .- vec(Vₙ)
+            show_statistics(M'M, dV'dV)
             for (iβ, β) in enumerate(βs)
                 Vₙopt += β * (Vs[iβ] - vec(Vₙ))
                 PfVₙopt += β * (PfVs[iβ] - vec(PfVₙ))
@@ -129,7 +132,8 @@ function anderson_rho(;m=Inf, mode=:diis)
             # We need to solve P' PfVₙ + P'M βs = 0
             rhs = - P'vec(PfVₙ)
             A = P'M
-            show_statistics(A)
+            dV = hcat(Vs...) .- vec(Vₙ)
+            show_statistics(A, dV'dV)
             βs = real.(A \ rhs)
             for (iβ, β) in enumerate(βs)
                 Vₙopt   += β * (Vs[iβ] - vec(Vₙ))
@@ -224,8 +228,8 @@ end
     diagtol = determine_diagtol(info)
     converged = false
 
-    # get_next = anderson(m=10, mode=:crop)
-    get_next = anderson_rho(m=Inf, mode=:crop)
+    # get_next = anderson(m=Inf) # , mode=:crop)
+    get_next = anderson_rho(m=Inf) #, mode=:crop)
     Eprev = Inf
     for i = 1:maxiter
         nextstate = EVρ(V; diagtol=diagtol)
