@@ -76,7 +76,7 @@ function anderson(;m=Inf, mode=:diis)
             # We need to solve 0 = M' PfVₙ + M'M βs <=> βs = - (M'M)⁻¹ M' PfVₙ
             βs = -M \ vec(PfVₙ)
             dV = hcat(Vs...) .- vec(Vₙ)
-            show_statistics(M'M, dV'dV)
+            # show_statistics(M'M, dV'dV)
             for (iβ, β) in enumerate(βs)
                 Vₙopt += β * (Vs[iβ] - vec(Vₙ))
                 PfVₙopt += β * (PfVs[iβ] - vec(PfVₙ))
@@ -181,6 +181,11 @@ end
                                   is_converged=ScfConvergenceEnergy(tol),
                                   callback=ScfDefaultCallback(),
                                   compute_consistent_energies=true,
+                                  accelerator=:diis, m=Inf,  # crop / anderson
+                                  mode=:standard,  # standard / heuristics / twostep
+                                  twostep_step1_accelerator=true,
+                                  twostep_step1_store_history=true,
+                                  twostep_switch_tol=0.1,
                                   )
     T = eltype(basis)
     model = basis.model
@@ -223,13 +228,24 @@ end
     V_prev = V
     ρ_prev = ρ
     ρ_spin_prev = ρspin
-    ΔE_prev_down = [zero(T)]
+    ΔE_prev_down = [one(T)]
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
     converged = false
+    determine_optimal = true
+    ΔE_pred = nothing
 
-    # get_next = anderson(m=Inf) # , mode=:crop)
-    get_next = anderson_rho(m=Inf) #, mode=:crop)
+    function init_accelerator()
+        if accelerator == :diis
+            return anderson(m=m, mode=:diis)
+        elseif accelerator == :crop
+            return anderson(m=m, mode=:crop)
+        elseif accelerator == :rhodiis
+            return anderson_rho(m=m, mode=:diis)
+        end
+    end
+    get_next = init_accelerator()
+
     Eprev = Inf
     for i = 1:maxiter
         nextstate = EVρ(V; diagtol=diagtol)
@@ -243,33 +259,61 @@ end
             break
         end
 
+        if mode == :twostep && !isnothing(ΔE_pred) && determine_optimal
+            abserror = abs(ΔE - ΔE_pred)
+
+            println("      ΔE           = ", ΔE)
+            println("      ΔE abs. err. = ", abserror)
+            if abserror < twostep_switch_tol
+                println("      --> switching to step 2 <--")
+                ΔE_pred = nothing
+                determine_optimal = false
+                if !twostep_step1_store_history  # restart the diis space
+                    get_next = init_accelerator()
+                end
+            end
+            println()
+        end
+
+
         info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
                 diagonalization=nextstate.diagonalization, converged=converged)
         callback(info)
 
-        reject_step = ΔE > 5mean(abs.(ΔE_prev_down[max(begin, end-1):end]))
-        if reject_step && i > 1
-            # Determine optimal damping
+        # Determine optimal damping for the step just taken along with the estimates
+        # for the slope and curvature along the search direction just explored
+        αopt = nothing
+        if i > 1 && ((mode != :twostep) || !determine_optimal)
             δV_prev = V - V_prev
-            αstep, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
-                                                            ρ_prev, ρ_spin_prev,
-                                                            ρout, ρ_spin_out)
+            αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
+                                                           ρ_prev, ρ_spin_prev,
+                                                           ρout, ρ_spin_out)
+            ΔE_pred = slope + curv * α^2 / 2
 
             # E(α) = slope * α + ½ curv * α²
-            # println("    rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
+            # println("      rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
             println("      ΔE           = ", ΔE)
-            println("      predicted ΔE = ", slope + curv/2)
-            println("      αopt         = ", αstep)
-            println("      pred αopt ΔE = ", slope * αstep + curv * αstep^2 / 2)
-            println()
-
-            V = V_prev + αstep * δV_prev
-            continue
-        else
-            αstep = α
+            println("      predicted ΔE = ", ΔE_pred)
+            println("      ΔE abs. err. = ", abs(ΔE - ΔE_pred))
+            println("      αopt         = ", αopt)
         end
+
+        if mode == :heuristics
+            # Reject if we go up in energy more than the most three recent
+            # decreases in energy
+            reject_step = ΔE > 5mean(abs.(ΔE_prev_down[max(begin, end-2):end]))
+
+            if reject_step && !isnothing(αopt)
+                println("      --> reject step <--")
+                println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
+                println()
+                V = V_prev + αopt * (V - V_prev)
+                continue  # Do not commit the new state
+            end
+        end
+        i > 1 && !(mode == :twostep && determine_optimal) && println()
 
         # Horrible mapping to the density-based SCF to use this function
         diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
@@ -278,20 +322,46 @@ end
         ΔE < 0 && i > 1 && (push!(ΔE_prev_down, ΔE))
         Eprev = E
         ψ = ψout
+        δF = (Vout - V)
         ρ_prev = ρout
         ρ_spin_prev = ρ_spin_out
-        δF = (Vout - V)
-
 
         # TODO A bit hackish for now ...
-        #      ... the (αstep / mixing.α) is to get rid of the implicit α of the mixing
+        #      ... the (α / mixing.α) is to get rid of the implicit α of the mixing
         info = (ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, n_iter=i)
-        Pinv_δF = (αstep / mixing.α) * mix(mixing, basis, δF; info...)
+        Pinv_δF = (α / mixing.α) * mix(mixing, basis, δF; info...)
 
         # Update V
         V_prev = V
-        V = get_next(basis, ρout, ρ_spin_out, V, Pinv_δF)
+        if mode == :twostep && determine_optimal
+            if twostep_step1_accelerator
+                # Get the next step by running Anderson
+                δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
+            elseif twostep_step1_store_history
+                # Populate Anderson history, but don't use it
+                get_next(basis, ρout, ρ_spin_out, V, Pinv_δF)
+                δV = Pinv_δF
+            else
+                δV = Pinv_δF
+            end
+
+            # How far along the search direction defined by δV do we want to go
+            nextstate = EVρ(V_prev + δV; diagtol=diagtol)
+            ρnext, ρ_spin_next = nextstate.ρout, nextstate.ρ_spin_out
+            αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV,
+                                                           ρout, ρ_spin_out,
+                                                           ρnext, ρ_spin_next)
+            # println("      rel curv     = ", curv / (dVol*dot(δV, δV)))
+            println("      αopt         = ", αopt)
+            ΔE_pred = slope * αopt + curv * αopt^2 / 2
+            println("      pred αopt ΔE = ", ΔE_pred)
+
+            V = V_prev + αopt * δV
+        else
+            # Just use Anderson
+            V = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF)
+        end
     end
 
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
