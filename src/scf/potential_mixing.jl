@@ -102,70 +102,6 @@ function anderson(;m=Inf, mode=:diis)
     end
 end
 
-function anderson_rho(;m=Inf, mode=:diis)
-    # TODO Huge code duplication with anderson()
-    #
-    # Fixed-point map  f(V)  = δF(V) = step(V) - V, where step(V) = (Vext + Vhxc(ρ(V)))
-    # SCF update       Pf(V) = α P⁻¹ f(V)
-    # SCF map          g(V)  = V + Pf(V)
-    #
-    # Finds the linear combination Vₙ₊₁ = g(Vₙ) + ∑ᵢ βᵢ (g(Vᵢ) - g(Vₙ))
-    # such that (ρₙ - ρᵢ)^† [Pf(Vₙ) + ∑ᵢ βᵢ (Pf(Vᵢ) - Pf(Vₙ))] = 0
-    #
-    Vs   = []  # The V     for each iteration
-    ρs   = []  # The ρ used to build the V
-    PfVs = []  # The Pf(V) for each iteration
-
-    function get_next(basis, ρₙ, ρspinₙ, Vₙ, PfVₙ)
-        n_spin = basis.model.n_spin_components
-        @assert n_spin == 1
-        @assert ρspinₙ === nothing
-
-        ρₙ = reshape(ρₙ.real, basis.fft_size..., n_spin)
-        ρₙopt = copy(vec(ρₙ))
-        Vₙopt = copy(vec(Vₙ))
-        PfVₙopt = copy(vec(PfVₙ))
-        # Vₙ₊₁ = Vₙ + PfVₙ
-        if !isempty(Vs)
-            M = hcat(PfVs...) .- vec(PfVₙ)  # Mᵢⱼ = (PfVⱼ)ᵢ - (PfVₙ)ᵢ
-            P = hcat(ρs...) .- vec(ρₙ)      # Pᵢⱼ = (ρⱼ)ᵢ   - (ρₙ)ᵢ
-            # We need to solve P' PfVₙ + P'M βs = 0
-            rhs = - P'vec(PfVₙ)
-            A = P'M
-            dV = hcat(Vs...) .- vec(Vₙ)
-            show_statistics(A, dV'dV)
-            βs = real.(A \ rhs)
-            for (iβ, β) in enumerate(βs)
-                Vₙopt   += β * (Vs[iβ] - vec(Vₙ))
-                PfVₙopt += β * (PfVs[iβ] - vec(PfVₙ))
-                ρₙopt   += β * (ρs[iβ] - vec(ρₙ))
-                #Vₙ₊₁ += reshape(β * (Vs[iβ] + PfVs[iβ] - vec(Vₙ) - vec(PfVₙ)),
-                #                basis.fft_size..., n_spin)
-            end
-        end
-        if mode == :crop
-            error("Untested")
-            push!(ρs, vec(ρₙopt))  # TODO or ρₙ or sth else?
-            push!(Vs, vec(Vₙopt))
-            push!(PfVs, vec(PfVₙopt))
-        else
-            push!(ρs, vec(ρₙ))
-            push!(Vs, vec(Vₙ))
-            push!(PfVs, vec(PfVₙ))
-        end
-        if length(Vs) > m
-            Vs = Vs[2:end]
-            ρs = ρs[2:end]
-            PfVs = PfVs[2:end]
-        end
-        @assert length(Vs) <= m
-
-        # Vₙ₊₁
-        reshape(Vₙopt + PfVₙopt, basis.fft_size..., n_spin)
-    end
-end
-
-
 @timing function potential_mixing(basis::PlaneWaveBasis;
                                   n_bands=default_n_bands(basis.model),
                                   ρ=guess_density(basis),
@@ -181,11 +117,8 @@ end
                                   is_converged=ScfConvergenceEnergy(tol),
                                   callback=ScfDefaultCallback(),
                                   compute_consistent_energies=true,
-                                  accelerator=:diis, m=Inf,  # crop / anderson
-                                  mode=:standard,  # standard / heuristics / twostep
-                                  twostep_step1_accelerator=true,
-                                  twostep_step1_store_history=true,
-                                  twostep_switch_tol=0.1,
+                                  m=Inf,
+                                  mode=:standard,  # standard / heuristics / guaranteed
                                   )
     T = eltype(basis)
     model = basis.model
@@ -232,20 +165,9 @@ end
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
     converged = false
-    determine_optimal = true
     ΔE_pred = nothing
 
-    function init_accelerator()
-        if accelerator == :diis
-            return anderson(m=m, mode=:diis)
-        elseif accelerator == :crop
-            return anderson(m=m, mode=:crop)
-        elseif accelerator == :rhodiis
-            return anderson_rho(m=m, mode=:diis)
-        end
-    end
-    get_next = init_accelerator()
-
+    get_next = anderson(m=m)
     Eprev = Inf
     for i = 1:maxiter
         nextstate = EVρ(V; diagtol=diagtol)
@@ -254,27 +176,15 @@ end
         Vout = cat(Vout..., dims=4)
 
         ΔE = E - Eprev
+        if mode == :guaranteed && !isnothing(ΔE_pred)
+            println("      ΔE           = ", ΔE)
+            println("      ΔE abs. err. = ", abs(ΔE - ΔE_pred))
+            println()
+        end
         if abs(ΔE) < tol
             converged = true
             break
         end
-
-        if mode == :twostep && !isnothing(ΔE_pred) && determine_optimal
-            abserror = abs(ΔE - ΔE_pred)
-
-            println("      ΔE           = ", ΔE)
-            println("      ΔE abs. err. = ", abserror)
-            if abserror < twostep_switch_tol
-                println("      --> switching to step 2 <--")
-                ΔE_pred = nothing
-                determine_optimal = false
-                if !twostep_step1_store_history  # restart the diis space
-                    get_next = init_accelerator()
-                end
-            end
-            println()
-        end
-
 
         info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
@@ -285,7 +195,7 @@ end
         # Determine optimal damping for the step just taken along with the estimates
         # for the slope and curvature along the search direction just explored
         αopt = nothing
-        if i > 1 && ((mode != :twostep) || !determine_optimal)
+        if i > 1 && mode != :guaranteed
             δV_prev = V - V_prev
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
                                                            ρ_prev, ρ_spin_prev,
@@ -313,7 +223,7 @@ end
                 continue  # Do not commit the new state
             end
         end
-        i > 1 && !(mode == :twostep && determine_optimal) && println()
+        i > 1 && mode != :guaranteed && println()
 
         # Horrible mapping to the density-based SCF to use this function
         diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
@@ -334,17 +244,9 @@ end
 
         # Update V
         V_prev = V
-        if mode == :twostep && determine_optimal
-            if twostep_step1_accelerator
-                # Get the next step by running Anderson
-                δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
-            elseif twostep_step1_store_history
-                # Populate Anderson history, but don't use it
-                get_next(basis, ρout, ρ_spin_out, V, Pinv_δF)
-                δV = Pinv_δF
-            else
-                δV = Pinv_δF
-            end
+        if mode == :guaranteed
+            # Get the next step by running Anderson
+            δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
 
             # How far along the search direction defined by δV do we want to go
             nextstate = EVρ(V_prev + δV; diagtol=diagtol)
