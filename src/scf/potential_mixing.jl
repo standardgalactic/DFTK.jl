@@ -1,5 +1,46 @@
 # TODO Refactor the code to be more in line with SCF
+using Statistics
 
+function RejectStepGuaranteed()
+    previously_rejected = true
+    function callback(info)
+        previously_rejected = !previously_rejected
+    end
+end
+
+function RejectStepEnergyHeuristics(;max_reject=1, reject_tol=1e-8, n_previous=2)
+    n_reject = 0
+    ΔE_previous = Float64[]
+
+    function callback(info)
+        dVol = info.basis.model.unit_cell_volume / prod(info.basis.fft_size)
+
+        if info.ΔE < reject_tol
+            push!(ΔE_previous, abs(info.ΔE))
+            n_reject = 0
+            return false  # Never reject if change is small or negative
+        end
+
+        if info.n_iter ≤ 1 && info.ΔE < 1
+            n_reject = 0
+            return false  # For the first step bigger differences are ok
+        end
+
+        if info.ΔE / abs(info.energies.total) > 5e-2 && n_reject < max_reject
+            n_reject += 1
+            return true
+        end
+
+        avg_ΔE = mean(ΔE_previous[max(begin, end - n_previous + 1):end])
+        if info.ΔE > avg_ΔE && n_reject < max_reject
+            n_reject += 1
+            return true
+        else
+            n_reject = 0
+            return false
+        end
+    end
+end
 
 
 function estimate_optimal_step_size(basis, δF, δV, ρout, ρ_spin_out, ρnext, ρ_spin_next)
@@ -118,7 +159,7 @@ end
                                   callback=ScfDefaultCallback(),
                                   compute_consistent_energies=true,
                                   m=Inf,
-                                  mode=:standard,  # standard / heuristics / guaranteed
+                                  reject_step=RejectStepEnergyHeuristics(),
                                   )
     T = eltype(basis)
     model = basis.model
@@ -140,7 +181,7 @@ end
     ρout = ρ
     ρ_spin_out = ρspin
 
-    _, ham = energy_hamiltonian(ρ.basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
+    energies, ham = energy_hamiltonian(ρ.basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
     V = cat(total_local_potential(ham)..., dims=4)
 
     dVol = model.unit_cell_volume / prod(basis.fft_size)
@@ -161,14 +202,19 @@ end
     V_prev = V
     ρ_prev = ρ
     ρ_spin_prev = ρspin
-    ΔE_prev_down = [one(T)]
     info = (ρin=ρ_prev, ρnext=ρ, n_iter=1)
     diagtol = determine_diagtol(info)
     converged = false
     ΔE_pred = nothing
+    ΔEerror = Inf
+
+    # TODO In a first phase (i.e. if we are so far outside the linear regime that
+    #      the estimate_optimal_step_size is just not working, we need to use an
+    #      even simpler approach (i.e. use the α suggested by the user and half it
+    #      in case of a reject.
 
     get_next = anderson(m=m)
-    Eprev = Inf
+    Eprev = energies.total
     for i = 1:maxiter
         nextstate = EVρ(V; diagtol=diagtol)
         energies, Vout, ψout, eigenvalues, occupation, εF, ρout, ρ_spin_out = nextstate
@@ -176,26 +222,15 @@ end
         Vout = cat(Vout..., dims=4)
 
         ΔE = E - Eprev
-        if mode == :guaranteed && !isnothing(ΔE_pred)
-            println("      ΔE           = ", ΔE)
-            println("      ΔE abs. err. = ", abs(ΔE - ΔE_pred))
-            println()
-        end
-        if abs(ΔE) < tol
+        if abs(ΔE) < tol && i > 1
             converged = true
             break
         end
 
-        info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
-                ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-                ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
-                diagonalization=nextstate.diagonalization, converged=converged)
-        callback(info)
-
         # Determine optimal damping for the step just taken along with the estimates
         # for the slope and curvature along the search direction just explored
         αopt = nothing
-        if i > 1 && mode != :guaranteed
+        if !isnothing(δF)
             δV_prev = V - V_prev
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
                                                            ρ_prev, ρ_spin_prev,
@@ -203,33 +238,40 @@ end
             ΔE_pred = slope + curv * α^2 / 2
 
             # E(α) = slope * α + ½ curv * α²
-            # println("      rel curv     = ", curv / (dVol*dot(δV_prev, δV_prev)))
+            ΔEerror = abs(ΔE - ΔE_pred)
             println("      ΔE           = ", ΔE)
             println("      predicted ΔE = ", ΔE_pred)
-            println("      ΔE abs. err. = ", abs(ΔE - ΔE_pred))
+            println("      ΔE abs. err. = ", ΔEerror)
             println("      αopt         = ", αopt)
-        end
 
-        if mode == :heuristics
-            # Reject if we go up in energy more than the most three recent
-            # decreases in energy
-            reject_step = ΔE > 5mean(abs.(ΔE_prev_down[max(begin, end-2):end]))
-
-            if reject_step && !isnothing(αopt)
-                println("      --> reject step <--")
-                println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
-                println()
-                V = V_prev + αopt * (V - V_prev)
-                continue  # Do not commit the new state
+            # if the ΔEerror is too large and αopt is outside a region of trust, adjust it
+            if ΔEerror > 1e-2
+                αopt = min(max(αopt, 5e-2), 2α)
+                println("      αopt (adj)   = ", αopt)
             end
         end
-        i > 1 && mode != :guaranteed && println()
+
+        info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
+                ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+                ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
+                diagonalization=nextstate.diagonalization, converged=converged,
+                αopt=αopt, ΔEerror=ΔEerror, ΔE=ΔE, V=V, V_prev=V_prev)
+        callback(info)
+
+        if reject_step(info) && !isnothing(αopt)
+            println("      αopt (adj)   = ", αopt)
+            println("      --> reject step <--")
+            println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
+            println()
+            V = V_prev + αopt * (V - V_prev)
+            continue  # Do not commit the new state
+        end
+        println()
 
         # Horrible mapping to the density-based SCF to use this function
         diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
 
         # Update state
-        ΔE < 0 && i > 1 && (push!(ΔE_prev_down, ΔE))
         Eprev = E
         ψ = ψout
         δF = (Vout - V)
@@ -244,7 +286,7 @@ end
 
         # Update V
         V_prev = V
-        if mode == :guaranteed
+        if false
             # Get the next step by running Anderson
             δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
 
@@ -254,6 +296,9 @@ end
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV,
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
+            αopt < 0 && (αopt = mixing.α)
+            αopt > 4mixing.α && (αopt = 4mixing.α)
+
             # println("      rel curv     = ", curv / (dVol*dot(δV, δV)))
             println("      αopt         = ", αopt)
             ΔE_pred = slope * αopt + curv * αopt^2 / 2
