@@ -239,15 +239,17 @@ end
 
             # E(α) = slope * α + ½ curv * α²
             ΔEerror = abs(ΔE - ΔE_pred)
-            println("      ΔE           = ", ΔE)
-            println("      predicted ΔE = ", ΔE_pred)
-            println("      ΔE abs. err. = ", ΔEerror)
-            println("      αopt         = ", αopt)
+            if mpi_master()
+                println("      ΔE           = ", ΔE)
+                println("      predicted ΔE = ", ΔE_pred)
+                println("      ΔE abs. err. = ", ΔEerror)
+                println("      αopt         = ", αopt)
+            end
 
             # if the ΔEerror is too large and αopt is outside a region of trust, adjust it
             if ΔEerror > 1e-2
                 αopt = min(max(αopt, 5e-2), 2α)
-                println("      αopt (adj)   = ", αopt)
+                mpi_master() && println("      αopt (adj)   = ", αopt)
             end
         end
 
@@ -259,14 +261,16 @@ end
         callback(info)
 
         if reject_step(info) && !isnothing(αopt)
-            println("      αopt (adj)   = ", αopt)
-            println("      --> reject step <--")
-            println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
-            println()
+            if mpi_master()
+                println("      αopt (adj)   = ", αopt)
+                println("      --> reject step <--")
+                println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
+                println()
+            end
             V = V_prev + αopt * (V - V_prev)
             continue  # Do not commit the new state
         end
-        println()
+        mpi_master() && println()
 
         # Horrible mapping to the density-based SCF to use this function
         diagtol = determine_diagtol((ρin=ρ_prev, ρnext=ρout, n_iter=i + 1))
@@ -300,9 +304,9 @@ end
             αopt > 4mixing.α && (αopt = 4mixing.α)
 
             # println("      rel curv     = ", curv / (dVol*dot(δV, δV)))
-            println("      αopt         = ", αopt)
+            mpi_master() && println("      αopt         = ", αopt)
             ΔE_pred = slope * αopt + curv * αopt^2 / 2
-            println("      pred αopt ΔE = ", ΔE_pred)
+            mpi_master() && println("      pred αopt ΔE = ", ΔE_pred)
 
             V = V_prev + αopt * δV
         else
