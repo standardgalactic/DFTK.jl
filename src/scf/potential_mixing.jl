@@ -248,7 +248,7 @@ end
 
             # if the ΔEerror is too large and αopt is outside a region of trust, adjust it
             if ΔEerror > 1e-2
-                αopt = min(max(αopt, 5e-2), 2α)
+                αopt = min(max(αopt, 5e-2), 3.0)
                 mpi_master() && println("      αopt (adj)   = ", αopt)
             end
         end
