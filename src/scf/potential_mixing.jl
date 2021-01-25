@@ -40,13 +40,14 @@ function RejectStepEnergyHeuristics(;max_reject=1, reject_tol=1e-8, n_previous=2
 
         if do_reject
             n_reject += 1
-            if relative_error_predicted > 5 || !αopt_in_trusted_region
-                mpi_master() && println("      --> α not trusted: $relative_error_predicted  $αopt")
-                # The αopt is not trustworthy
-                # => Take smaller and smaller fractions of base α
-                α_factor = min(α_factor, 1 / (n_reject + 1))
-                return do_reject, α * α_factor
-            elseif n_reject > max_reject
+            # if relative_error_predicted > 5 || !αopt_in_trusted_region
+            #     mpi_master() && println("      --> α not trusted: $relative_error_predicted  $αopt")
+            #     # The αopt is not trustworthy
+            #     # => Take smaller and smaller fractions of base α
+            #     α_factor = min(α_factor, 1 / (n_reject + 1))
+            #     return do_reject, α * α_factor
+            # else
+            if n_reject > max_reject
                 # Beyond maximal number of rejects (to avoid infinite reject loops)
                 # => just ignore the reject
                 do_reject = false
