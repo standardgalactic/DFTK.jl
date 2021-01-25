@@ -3,42 +3,90 @@ using Statistics
 
 function RejectStepGuaranteed()
     previously_rejected = true
-    function callback(info)
-        previously_rejected = !previously_rejected
+    function callback(info, αopt, α)
+        do_reject = (previously_rejected = !previously_rejected)
+        do_reject, αopt
     end
 end
 
 function RejectStepEnergyHeuristics(;max_reject=1, reject_tol=1e-8, n_previous=2)
     n_reject = 0
     ΔE_previous = Float64[]
+    α_factor = 1.0
 
-    function callback(info)
-        dVol = info.basis.model.unit_cell_volume / prod(info.basis.fft_size)
-
-        if info.ΔE < reject_tol
-            push!(ΔE_previous, abs(info.ΔE))
-            n_reject = 0
-            return false  # Never reject if change is small or negative
-        end
-
-        if info.n_iter ≤ 1 && info.ΔE < 1
-            n_reject = 0
-            return false  # For the first step bigger differences are ok
-        end
-
-        if info.ΔE / abs(info.energies.total) > 5e-2 && n_reject < max_reject
-            n_reject += 1
-            return true
-        end
-
+    function callback(info, αopt, α)
+        relative_energy_change = info.ΔE / abs(info.energies.total)
         avg_ΔE = mean(ΔE_previous[max(begin, end - n_previous + 1):end])
-        if info.ΔE > avg_ΔE && n_reject < max_reject
-            n_reject += 1
-            return true
-        else
-            n_reject = 0
-            return false
+        αopt_in_trusted_region = isnothing(αopt) ? true : 5e-2 < αopt < 3.0
+        relative_error_predicted = isnothing(info.ΔE_pred) ? 0.0 : abs(info.ΔEerror / info.ΔE_pred)
+
+        do_reject = false
+        if info.ΔE < reject_tol
+            # Never reject if change is small or negative
+            do_reject = false
+        elseif info.n_iter ≤ 1 && info.ΔE < 1
+            # For the first step bigger differences are ok
+            do_reject = false
+        elseif relative_energy_change > 5e-2
+            # This is more for the initial SCF steps
+            # (e.g. where Anderson goes in a very stupid direction)
+            do_reject = true
+            mpi_master() && println("      --> Reject: Relative E change")
+        elseif info.ΔE > avg_ΔE
+            # This is more for the later SCF steps (e.g. where Kerker gets stuck)
+            mpi_master() && println("      --> Reject: Increase beyond average")
+            do_reject = true
         end
+
+        if do_reject
+            n_reject += 1
+            if relative_error_predicted > 5 || !αopt_in_trusted_region
+                mpi_master() && println("      --> α not trusted: $relative_error_predicted  $αopt")
+                # The αopt is not trustworthy
+                # => Take smaller and smaller fractions of base α
+                α_factor = min(α_factor, 1 / (n_reject + 1))
+                return do_reject, α * α_factor
+            elseif n_reject > max_reject
+                # Beyond maximal number of rejects (to avoid infinite reject loops)
+                # => just ignore the reject
+                do_reject = false
+            end
+        end
+        if !do_reject
+            info.ΔE < 0 && push!(ΔE_previous, abs(info.ΔE))
+            n_reject = 0
+        end
+
+        do_reject, αopt
+        # Old version
+        # if info.ΔE < reject_tol
+        #     push!(ΔE_previous, abs(info.ΔE))
+        #     n_reject = 0
+        #     α_factor = 1
+        #     return false, αopt  # Never reject if change is small or negative
+        # end
+
+        # if info.n_iter ≤ 1 && info.ΔE < 1
+        #     n_reject = 0
+        #     α_factor = 1
+        #     return false, αopt  # For the first step bigger differences are ok
+        # end
+
+        # relative_energy_change = info.ΔE / abs(info.energies.total)
+        # if relative_energy_change > 5e-2 && n_reject < max_reject
+        #     n_reject += 1
+        #     return true, αopt
+        # end
+
+        # avg_ΔE = mean(ΔE_previous[max(begin, end - n_previous + 1):end])
+        # if info.ΔE > avg_ΔE && n_reject < max_reject
+        #     n_reject += 1
+        #     return true, αopt
+        # else
+        #     n_reject = 0
+        #     α_factor = 1
+        #     return false, αopt
+        # end
     end
 end
 
@@ -243,6 +291,7 @@ end
                 println("      ΔE           = ", ΔE)
                 println("      predicted ΔE = ", ΔE_pred)
                 println("      ΔE abs. err. = ", ΔEerror)
+                println("      ΔE rel. err. = ", abs(ΔEerror / ΔE_pred))
                 println("      αopt         = ", αopt)
             end
 
@@ -257,10 +306,11 @@ end
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, ρin=ρ_prev, stage=:iterate,
                 diagonalization=nextstate.diagonalization, converged=converged,
-                αopt=αopt, ΔEerror=ΔEerror, ΔE=ΔE, V=V, V_prev=V_prev)
+                αopt=αopt, ΔEerror=ΔEerror, ΔE=ΔE, ΔE_pred=ΔE_pred, V=V, V_prev=V_prev)
         callback(info)
 
-        if reject_step(info) && !isnothing(αopt)
+        do_reject, αopt = reject_step(info, αopt, mixing.α)
+        if do_reject && !isnothing(αopt)
             if mpi_master()
                 println("      αopt (adj)   = ", αopt)
                 println("      --> reject step <--")
