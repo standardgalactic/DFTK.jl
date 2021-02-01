@@ -195,6 +195,7 @@ end
 @timing function potential_mixing(basis::PlaneWaveBasis;
                                   n_bands=default_n_bands(basis.model),
                                   ρ=guess_density(basis),
+                                  V=nothing,
                                   ρspin=guess_spin_density(basis),
                                   ψ=nothing,
                                   tol=1e-6,
@@ -231,8 +232,9 @@ end
     ρ_spin_out = ρspin
 
     energies, ham = energy_hamiltonian(ρ.basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
-    V = cat(total_local_potential(ham)..., dims=4)
-
+    if isnothing(V)
+        V = cat(total_local_potential(ham)..., dims=4)
+    end
     dVol = model.unit_cell_volume / prod(basis.fft_size)
 
     function EVρ(V; diagtol=tol / 10)
