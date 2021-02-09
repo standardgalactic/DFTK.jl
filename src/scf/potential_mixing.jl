@@ -18,7 +18,7 @@ function RejectStepEnergyHeuristics(;max_reject=1, reject_tol=1e-8, n_previous=2
         relative_energy_change = info.ΔE / abs(info.energies.total)
         avg_ΔE = mean(ΔE_previous[max(begin, end - n_previous + 1):end])
         αopt_in_trusted_region = isnothing(αopt) ? true : 5e-2 < αopt < 3.0
-        relative_error_predicted = isnothing(info.ΔE_pred) ? 0.0 : abs(info.ΔEerror / info.ΔE_pred)
+        log_error_predicted = isnothing(info.ΔE_pred) ? -Inf : log10(abs(info.ΔEerror / info.ΔE_pred))
 
         do_reject = false
         if info.ΔE < reject_tol
@@ -40,13 +40,13 @@ function RejectStepEnergyHeuristics(;max_reject=1, reject_tol=1e-8, n_previous=2
 
         if do_reject
             n_reject += 1
-            # if relative_error_predicted > 5 || !αopt_in_trusted_region
-            #     mpi_master() && println("      --> α not trusted: $relative_error_predicted  $αopt")
-            #     # The αopt is not trustworthy
-            #     # => Take smaller and smaller fractions of base α
-            #     α_factor = min(α_factor, 1 / (n_reject + 1))
-            #     return do_reject, α * α_factor
-            # else
+            if log_error_predicted > 0 || !αopt_in_trusted_region
+                mpi_master() && println("      --> α not trusted: $log_error_predicted  $αopt")
+                # The αopt is not trustworthy
+                # => Take smaller and smaller fractions of base α
+                n_reject > 1 && (α_factor /= 2)
+                αopt = α_factor * α
+            end
             if n_reject > max_reject
                 # Beyond maximal number of rejects (to avoid infinite reject loops)
                 # => just ignore the reject
@@ -192,6 +192,22 @@ function anderson(;m=Inf, mode=:diis)
     end
 end
 
+
+using Plots
+function plot_along_line(EVρ, E_prev, V_prev, δV, αopt, slope, curv)
+    println("        -> Running plot")
+    αs = append!([αopt], 0.1:0.2:1.5)
+    Es = [EVρ(V_prev + α * δV)[1].total for α in αs] .- E_prev
+    p = scatter(αs[2:end], Es[2:end], color=1, m=:x, ms=4, label="computed", legend=:topleft)
+    p = scatter!(p, [αs[1]], [Es[1]], color=2, m=:+, ms=4, label="optimal")
+
+    model(α) = slope * α + curv * α^2 / 2
+    rel_error = log10(abs((Es[1] - model(αs[1])) / Es[1]))
+    αfine = min(αopt, 0.0):0.05:max(αopt, 1.5)
+    plot!(p, αfine, model.(αfine), color=1, label="model ($(@sprintf "%5.3f" rel_error)")
+end
+
+
 @timing function potential_mixing(basis::PlaneWaveBasis;
                                   n_bands=default_n_bands(basis.model),
                                   ρ=guess_density(basis),
@@ -210,6 +226,8 @@ end
                                   compute_consistent_energies=true,
                                   m=Inf,
                                   reject_step=RejectStepEnergyHeuristics(),
+                                  use_guaranteed=false,
+                                  plotprefix=nothing,
                                   )
     T = eltype(basis)
     model = basis.model
@@ -258,6 +276,7 @@ end
     converged = false
     ΔE_pred = nothing
     ΔEerror = Inf
+    αopt = nothing
 
     # TODO In a first phase (i.e. if we are so far outside the linear regime that
     #      the estimate_optimal_step_size is just not working, we need to use an
@@ -280,28 +299,21 @@ end
 
         # Determine optimal damping for the step just taken along with the estimates
         # for the slope and curvature along the search direction just explored
-        αopt = nothing
-        if !isnothing(δF)
+        if !isnothing(δF) && !use_guaranteed
             δV_prev = V - V_prev
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV_prev,
                                                            ρ_prev, ρ_spin_prev,
                                                            ρout, ρ_spin_out)
             ΔE_pred = slope + curv * α^2 / 2
-
-            # E(α) = slope * α + ½ curv * α²
+        end
+        if !isnothing(ΔE_pred)
             ΔEerror = abs(ΔE - ΔE_pred)
             if mpi_master()
+                println("      αopt         = ", αopt)
                 println("      ΔE           = ", ΔE)
                 println("      predicted ΔE = ", ΔE_pred)
                 println("      ΔE abs. err. = ", ΔEerror)
-                println("      ΔE rel. err. = ", abs(ΔEerror / ΔE_pred))
-                println("      αopt         = ", αopt)
-            end
-
-            # if the ΔEerror is too large and αopt is outside a region of trust, adjust it
-            if ΔEerror > 1e-2
-                αopt = min(max(αopt, 5e-2), 3.0)
-                mpi_master() && println("      αopt (adj)   = ", αopt)
+                println("      ΔE rel. err. = ", log10(abs(ΔEerror / ΔE_pred)))
             end
         end
 
@@ -312,7 +324,11 @@ end
                 αopt=αopt, ΔEerror=ΔEerror, ΔE=ΔE, ΔE_pred=ΔE_pred, V=V, V_prev=V_prev)
         callback(info)
 
-        do_reject, αopt = reject_step(info, αopt, mixing.α)
+        if use_guaranteed
+            do_reject = false
+        else
+            do_reject, αopt = reject_step(info, αopt, mixing.α)
+        end
         if do_reject && !isnothing(αopt)
             if mpi_master()
                 println("      αopt (adj)   = ", αopt)
@@ -343,7 +359,7 @@ end
 
         # Update V
         V_prev = V
-        if false
+        if use_guaranteed
             # Get the next step by running Anderson
             δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
 
@@ -353,14 +369,15 @@ end
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV,
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
-            αopt < 0 && (αopt = mixing.α)
-            αopt > 4mixing.α && (αopt = 4mixing.α)
 
-            # println("      rel curv     = ", curv / (dVol*dot(δV, δV)))
-            mpi_master() && println("      αopt         = ", αopt)
+            αopt = max(5e-2, αopt)
+            αopt = min(αopt, 3.0)
+
             ΔE_pred = slope * αopt + curv * αopt^2 / 2
-            mpi_master() && println("      pred αopt ΔE = ", ΔE_pred)
-
+            if !isnothing(plotprefix) && (i < 11)
+                p = plot_along_line(EVρ, Eprev, V_prev, δV, αopt, slope, curv)
+                savefig(p, plotprefix * ".quadratic.$i.pdf")
+            end
             V = V_prev + αopt * δV
         else
             # Just use Anderson
