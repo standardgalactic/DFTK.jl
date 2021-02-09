@@ -370,8 +370,8 @@ end
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
 
-            αopt = max(5e-2, αopt)
-            αopt = min(αopt, 3.0)
+            αopt = max(0.05, αopt)  # Empirical constants
+            αopt = min(αopt, 1.5)
 
             ΔE_pred = slope * αopt + curv * αopt^2 / 2
             if !isnothing(plotprefix) && (i < 11)
