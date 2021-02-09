@@ -355,7 +355,11 @@ end
         #      ... the (α / mixing.α) is to get rid of the implicit α of the mixing
         info = (ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, n_iter=i)
-        Pinv_δF = (α / mixing.α) * mix(mixing, basis, δF; info...)
+        prefac = (α / mixing.α)
+        if use_guaranteed
+            prefac = 1.0 / mixing.α  # To get rid of the implicit α of the mixing
+        end
+        Pinv_δF = prefac * mix(mixing, basis, δF; info...)
 
         # Update V
         V_prev = V
