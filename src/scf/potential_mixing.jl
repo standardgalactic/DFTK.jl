@@ -319,7 +319,7 @@ end
                 println("      ΔE           = ", ΔE)
                 println("      predicted ΔE = ", ΔE_pred)
                 println("      ΔE abs. err. = ", ΔEerror)
-                println("      ΔE rel. err. = ", log10(abs(ΔEerror / ΔE_pred)))
+                println("      ΔE rel. err. = ", log10(abs(ΔEerror / ΔE)))
             end
         end
 
@@ -382,7 +382,7 @@ end
             # How far along the search direction defined by δV do we want to go
             nextstate = EVρ(V_prev + α_trial * δV; diagtol=diagtol)
             ρnext, ρ_spin_next = nextstate.ρout, nextstate.ρ_spin_out
-            αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV,
+            αopt, slope, curv = estimate_optimal_step_size(basis, δF, α_trial * δV,
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
 
