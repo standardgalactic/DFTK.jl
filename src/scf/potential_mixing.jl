@@ -227,7 +227,11 @@ end
                                   m=Inf,
                                   reject_step=RejectStepEnergyHeuristics(),
                                   use_guaranteed=false,
+                                  # if use_guaranteed:
                                   plotprefix=nothing,
+                                  α_trial=1.0,
+                                  α_min=0.05,
+                                  α_max=1.5,
                                   )
     T = eltype(basis)
     model = basis.model
@@ -277,6 +281,8 @@ end
     ΔE_pred = nothing
     ΔEerror = Inf
     αopt = nothing
+    slope = nothing
+    curv = nothing
 
     # TODO In a first phase (i.e. if we are so far outside the linear regime that
     #      the estimate_optimal_step_size is just not working, we need to use an
@@ -326,14 +332,19 @@ end
 
         if use_guaranteed
             do_reject = false
+            if ΔE > 1e-6 && !isnothing(αopt)
+                do_reject = true
+                αopt /= 2
+            end
         else
             do_reject, αopt = reject_step(info, αopt, mixing.α)
         end
         if do_reject && !isnothing(αopt)
+            ΔE_pred = slope * αopt + curv * αopt^2 / 2
             if mpi_master()
-                println("      αopt (adj)   = ", αopt)
                 println("      --> reject step <--")
-                println("      pred αopt ΔE = ", slope * αopt + curv * αopt^2 / 2)
+                println("      αopt (adj)   = ", αopt)
+                println("      pred αopt ΔE = ", ΔE_pred)
                 println()
             end
             V = V_prev + αopt * (V - V_prev)
@@ -355,9 +366,10 @@ end
         #      ... the (α / mixing.α) is to get rid of the implicit α of the mixing
         info = (ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
                 ρout=ρout, ρ_spin_out=ρ_spin_out, n_iter=i)
-        prefac = (α / mixing.α)
         if use_guaranteed
-            prefac = 1.0 / mixing.α  # To get rid of the implicit α of the mixing
+            prefac = 1 / mixing.α  # To get rid of the implicit α of the mixing
+        else
+            prefac = (α / mixing.α)
         end
         Pinv_δF = prefac * mix(mixing, basis, δF; info...)
 
@@ -368,14 +380,14 @@ end
             δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
 
             # How far along the search direction defined by δV do we want to go
-            nextstate = EVρ(V_prev + δV; diagtol=diagtol)
+            nextstate = EVρ(V_prev + α_trial * δV; diagtol=diagtol)
             ρnext, ρ_spin_next = nextstate.ρout, nextstate.ρ_spin_out
             αopt, slope, curv = estimate_optimal_step_size(basis, δF, δV,
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
 
-            αopt = max(0.05, αopt)  # Empirical constants
-            αopt = min(αopt, 1.5)
+            αopt = max(α_min, αopt)  # Empirical constants
+            αopt = min(αopt, α_max)
 
             ΔE_pred = slope * αopt + curv * αopt^2 / 2
             if !isnothing(plotprefix) && (i < 11)
