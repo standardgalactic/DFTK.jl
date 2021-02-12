@@ -154,7 +154,7 @@ function anderson(;m=Inf, mode=:diis)
     Vs   = []  # The V     for each iteration
     PfVs = []  # The Pf(V) for each iteration
 
-    function get_next(basis, ρₙ, ρspinₙ, Vₙ, PfVₙ)
+    function get_next(basis, Vₙ, PfVₙ)
         n_spin = basis.model.n_spin_components
 
         Vₙopt = copy(vec(Vₙ))
@@ -377,7 +377,7 @@ end
         V_prev = V
         if use_guaranteed
             # Get the next step by running Anderson
-            δV = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF) - V_prev
+            δV = get_next(basis, V_prev, Pinv_δF) - V_prev
 
             # How far along the search direction defined by δV do we want to go
             nextstate = EVρ(V_prev + α_trial * δV; diagtol=diagtol)
@@ -397,7 +397,7 @@ end
             V = V_prev + αopt * δV
         else
             # Just use Anderson
-            V = get_next(basis, ρout, ρ_spin_out, V_prev, Pinv_δF)
+            V = get_next(basis, V_prev, Pinv_δF)
         end
     end
 
@@ -405,6 +405,189 @@ end
     ham = hamiltonian_with_total_potential(ham, Vunpack)
     info = (ham=ham, basis=basis, energies=energies, converged=converged,
             ρ=ρout, ρspin=ρ_spin_out, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+            n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ, stage=:finalize)
+    callback(info)
+    info
+end
+
+
+function potmix_quadratic_model(basis, α0, Vin, Vout, Vnext, ρin, ρ_spin_in, ρnext, ρ_spin_next)
+    # Vout    = step(V), where step(V) = (Vext + Vhxc(ρ(V)))
+    # Vnext   = Vin + α0 * (Anderson(Vin, P⁻¹( Vout - Vin )) - Vin)
+    # ρin     = ρ(Vin)
+    # ρnext   = ρ(Vnext)
+    # α0 * δV = Vnext - Vin = α0 * (Anderson(Vin, P⁻¹( Vout - Vin )) - Vin)
+    # δρ      = ρnext - ρin
+    #
+    # We build a quadratic model for
+    #   ϕ(α) = E(Vin  + α δV)  at α = 0
+    #        = E(Vin) + α ∇E|_(V=Vin) ⋅ δV + ½ α^2 <δV | ∇²E|_(V=Vin) | δV>
+    #        = E(Vin) + (α/α0) ∇E|_(V=Vin) ⋅ (α0 * δV) + ½ (α/α0)² <α0 * δV | ∇²E|_(V=Vin) | α0 * δV>
+    #
+    # Now
+    #      ∇E|_(V=Vin)  = - χ₀(Vout - Vin)
+    #      ∇²E|_(V=Vin) ≃ - χ₀ (1 - K χ₀)        (only true if Vin is an SCF minimum, K taken at Vin)
+    # and therefore using the self-adjointness of χ₀
+    #      ∇E|_(V=Vin) ⋅ δV         = -(Vout - Vin) ⋅ χ₀(δV) = - (Vout - Vin) ⋅ δρ
+    #      <δV | ∇²E|_(V=Vin) | δV> = - δV ⋅ δρ + δρ ⋅ K(δρ)
+    #
+
+    dVol = basis.model.unit_cell_volume / prod(basis.fft_size)
+    n_spin = basis.model.n_spin_components
+
+    δV = Vnext - Vin
+    δF = Vout  - Vin
+
+    δρ = (ρnext - ρin).real
+    if !isnothing(ρ_spin_in)
+        δρspin = (ρ_spin_next - ρ_spin_in).real
+        δρ_RFA     = from_real(basis, δρ)
+        δρspin_RFA = from_real(basis, δρspin)
+
+        δρα = (δρ + δρspin) / 2
+        δρβ = (δρ - δρspin) / 2
+        δρ = cat(δρα, δρβ, dims=4)
+    else
+        δρ_RFA = from_real(basis, δρ)
+        δρspin_RFA = nothing
+        δρ = reshape(δρ, basis.fft_size..., 1)
+    end
+
+    slope = dVol * dot(δF, δρ) / α0
+    Kδρ = apply_kernel(basis, δρ_RFA, δρspin_RFA; ρ=ρin, ρspin=ρ_spin_in)
+    if n_spin == 1
+        Kδρ = reshape(Kδρ[1].real, basis.fft_size..., 1)
+    else
+        Kδρ = cat(Kδρ[1].real, Kδρ[2].real, dims=4)
+    end
+    curv = dVol * (-dot(δV, δρ) + dot(δρ, Kδρ)) / α0^2
+
+    slope, curv
+end
+
+
+@timing function potential_mixing_guaranteed(basis::PlaneWaveBasis;
+                                             n_bands=default_n_bands(basis.model),
+                                             ρ=guess_density(basis), V=nothing,
+                                             ρspin=guess_spin_density(basis),
+                                             ψ=nothing, tol=1e-6, maxiter=100,
+                                             solver=scf_nlsolve_solver(),
+                                             eigensolver=lobpcg_hyper,
+                                             n_ep_extra=3,
+                                             determine_diagtol=ScfDiagtol(),
+                                             mixing=SimpleMixing(),
+                                             is_converged=ScfConvergenceEnergy(tol),
+                                             callback=ScfDefaultCallback(),
+                                             m=Inf, α_trial=1.0, α_min=0.01)
+    model  = basis.model
+    n_spin = basis.model.n_spin_components
+    dVol   = model.unit_cell_volume / prod(basis.fft_size)
+
+    # Initial guess for V and ψ (if none given)
+    if ψ !== nothing
+        @assert length(ψ) == length(basis.kpoints)
+        for ik in 1:length(basis.kpoints)
+            @assert size(ψ[ik], 2) == n_bands + n_ep_extra
+        end
+    end
+    energies, ham = energy_hamiltonian(basis, nothing, nothing; ρ=ρ, ρspin=ρspin)
+    isnothing(V) && (V = cat(total_local_potential(ham)..., dims=4))
+
+
+    function EVρ(V; diagtol=tol / 10, ψ=nothing)
+        Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
+        ham_V = hamiltonian_with_total_potential(ham, Vunpack)
+        res_V = next_density(ham_V; n_bands=n_bands,
+                             ψ=ψ, n_ep_extra=n_ep_extra, miniter=1, tol=diagtol)
+        new_E, new_ham = energy_hamiltonian(basis, res_V.ψ, res_V.occupation;
+                                            ρ=res_V.ρout, ρspin=res_V.ρ_spin_out,
+                                            eigenvalues=res_V.eigenvalues, εF=res_V.εF)
+        (energies=new_E, Vout=total_local_potential(new_ham), res_V...)
+    end
+
+    # Initialise iteration state
+    # All quantitities without any _out or _next specifier are derived from V == Vin
+    occupation  = nothing
+    eigenvalues = nothing
+    εF          = nothing
+    ρ_prev      = ρ
+    n_iter      = 0
+    diagtol     = determine_diagtol(;ρin=ρ_prev, n_iter=n_iter)
+    state       = EVρ(V; diagtol=diagtol, ψ=ψ)
+
+    get_next = anderson(m=m)
+    for i = 1:maxiter
+        n_iter = i
+        energies, Vout, ψ, eigenvalues, occupation, εF, ρ, ρ_spin = state
+        Etotal = energies.total
+        Vout   = cat(Vout..., dims=4)
+        δF     = Vout - V
+
+        # TODO A bit hackish for now with the ρout = ρ, ρin=ρ_prev stuff ...
+        info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
+                ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
+                ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, stage=:iterate,
+                diagonalization=state.diagonalization, converged=converged)
+        callback(info)
+
+        # XXX mixing contains an implicit α at the moment
+        Pinv_δF = mix(mixing, basis, δF; info...) / mixing.α
+        δV      = get_next(basis, V, Pinv_δF) - V
+
+        # Determine stepsize and take next step
+        α = α_trial
+        guess = ψ
+        while true
+            Vnext = V + α * δV
+            state_next  = EVρ(Vnext; diagtol=diagtol, guess=guess)
+            Etotal_next = state_next.energies.total
+            ρnext       = state_next.ρout
+            ρ_spin_next = state_next.ρ_spin_out
+
+            if mpi_master()
+                println("    α = $α")
+                println("        ΔE        = $(Etotal_next - Etotal)")
+            end
+
+            if Etotal_next < Etotal || α ≤ α_min
+                # Accept any energy-decreasing step (or if α is already too small)
+                state  = state_next
+                ρ_prev = ρ
+                mpi_master() && println()
+                break
+            end
+
+            slope, curv = potmix_quadratic_model(basis, α, V, Vout, Vnext, ρ, ρ_spin, ρnext, ρ_spin_next)
+            has_minimum = slope < 0 && curv > 0  # Only this model has a minimum in [0, ∞)
+            Emodel = Etotal + slope * α + curv * α^2 / 2
+            model_relerror = abs(Etotal_next - Emodel) / abs(Etotal_next - Etotal)
+
+            if mpi_master()
+                println("        ΔE_pred   = $(Emodel - Etotal)")
+                println("        relerror  = $model_relerror")
+                println("        αopt      = $(-slope / curv)")
+            end
+
+            modeltol = 0.1  # Relative error in the model, which is acceptable
+            if has_minimum && model_relerror < modeltol
+                α_next = -slope / curv
+                α_next = min(0.95α, -slope / curv)  # 0.95 to avoid getting stuck
+            else
+                mpi_master() && println("        ---> rejecting model")
+                α_next = α / 2
+            end
+            α_next = max(α_next, α_min)  # Don't undershoot
+
+            # Adjust guess: Use whatever state is closest
+            guess = α_next > α / 2 ? state_next.ψ : ψ
+            α = α_next
+        end
+    end
+
+    Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
+    ham  = hamiltonian_with_total_potential(ham, Vunpack)
+    info = (ham=ham, basis=basis, energies=energies, converged=converged,
+            ρ=ρ, ρspin=ρspin, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
             n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ, stage=:finalize)
     callback(info)
     info
