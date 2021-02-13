@@ -478,6 +478,7 @@ end
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
                                              m=10, α_trial=mixing.α, α_min=1 / 32,
+                                             modeltol=0.1,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
                                             )
@@ -557,7 +558,7 @@ end
                 println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter")
             end
 
-            if Etotal_next - Etotal < 50tol || α ≤ α_min || always_accept
+            if Etotal_next - Etotal < 10tol || α ≤ α_min || always_accept
                 # Accept any energy-decreasing step (or if α is already too small)
                 state  = state_next
                 ρ_prev = ρ
@@ -580,11 +581,11 @@ end
                 println("        ΔE_next   = $(Emodel(-slope / curv) - Etotal)")
             end
 
-            modeltol = 0.1  # Relative error in the model, which is acceptable
+            # modeltol = 0.1  # Relative error in the model, which is acceptable
             reject_model = (
                    curv < 0  # Otherwise stationary point is a maximum
                 || model_relerror > modeltol  # Model not trustworthy
-                || (slope > 0 && model_relerror > 0.1modeltol)  # Uphill slope not trusted
+                || (slope > 0 && model_relerror > 0.2modeltol)  # Uphill slope not trusted
             )
             if reject_model
                 mpi_master() && println("        ---> Rejecting model")
