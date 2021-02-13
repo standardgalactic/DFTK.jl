@@ -478,7 +478,10 @@ end
                                              mixing=SimpleMixing(),
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
-                                             m=Inf, α_trial=1.0, α_min=0.01)
+                                             m=Inf, α_trial=1.0, α_min=1/32,
+                                             # For debugging and to get "standard" algo
+                                             always_accept=false
+                                            )
     model  = basis.model
     n_spin = basis.model.n_spin_components
     dVol   = model.unit_cell_volume / prod(basis.fft_size)
@@ -512,6 +515,7 @@ end
     εF          = nothing
     ρ_prev      = ρ
     n_iter      = 0
+    converged   = false
     diagtol     = determine_diagtol(;ρin=ρ_prev, n_iter=n_iter)
     state       = EVρ(V; diagtol=diagtol, ψ=ψ)
 
@@ -529,6 +533,7 @@ end
                 ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, stage=:iterate,
                 diagonalization=state.diagonalization, converged=converged)
         callback(info)
+        is_converged(info) && (converged = true)
 
         # XXX mixing contains an implicit α at the moment
         Pinv_δF = mix(mixing, basis, δF; info...) / mixing.α
@@ -544,12 +549,13 @@ end
             ρnext       = state_next.ρout
             ρ_spin_next = state_next.ρ_spin_out
 
+            diagiter = mpi_mean(mean(state_next.diagonalization.iterations), basis.comm_kpts)
             if mpi_master()
                 println("    α = $α")
-                println("        ΔE        = $(Etotal_next - Etotal)")
+                println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter")
             end
 
-            if Etotal_next < Etotal || α ≤ α_min
+            if Etotal_next < Etotal || α ≤ α_min || always_accept
                 # Accept any energy-decreasing step (or if α is already too small)
                 state  = state_next
                 ρ_prev = ρ
@@ -558,23 +564,34 @@ end
             end
 
             slope, curv = potmix_quadratic_model(basis, α, V, Vout, Vnext, ρ, ρ_spin, ρnext, ρ_spin_next)
-            has_minimum = slope < 0 && curv > 0  # Only this model has a minimum in [0, ∞)
+
             Emodel = Etotal + slope * α + curv * α^2 / 2
             model_relerror = abs(Etotal_next - Emodel) / abs(Etotal_next - Etotal)
 
             if mpi_master()
                 println("        ΔE_pred   = $(Emodel - Etotal)")
                 println("        relerror  = $model_relerror")
+                println("        slope     = $slope")
+                println("        curv      = $curv")
                 println("        αopt      = $(-slope / curv)")
             end
 
             modeltol = 0.1  # Relative error in the model, which is acceptable
-            if has_minimum && model_relerror < modeltol
-                α_next = -slope / curv
-                α_next = min(0.95α, -slope / curv)  # 0.95 to avoid getting stuck
-            else
-                mpi_master() && println("        ---> rejecting model")
+            reject_model = (
+                   curv < 0  # Otherwise stationary point is a maximum
+                || model_relerror > modeltol  # Model not trustworthy
+                || (slope > 0 && model_relerror > 0.1modeltol)  # Uphill slope not trusted
+            )
+            if reject_model
+                mpi_master() && println("        ---> Rejecting model")
                 α_next = α / 2
+            elseif slope > 0
+                mpi_master() && println("        ---> Uphill slope")
+                α_next = α_min
+            else
+                # Use model to get optimal damping
+                α_next = -slope / curv
+                α_next = min(0.95α, -slope / curv)  # to avoid getting stuck
             end
             α_next = max(α_next, α_min)  # Don't undershoot
 
