@@ -471,17 +471,18 @@ end
                                              ρ=guess_density(basis), V=nothing,
                                              ρspin=guess_spin_density(basis),
                                              ψ=nothing, tol=1e-6, maxiter=100,
-                                             solver=scf_nlsolve_solver(),
                                              eigensolver=lobpcg_hyper,
                                              n_ep_extra=3,
                                              determine_diagtol=ScfDiagtol(),
-                                             mixing=SimpleMixing(),
+                                             mixing=SimpleMixing(α=1.0),
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
-                                             m=Inf, α_trial=1.0, α_min=1/32,
+                                             m=10, α_trial=mixing.α, α_min=1 / 32,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
                                             )
+    @assert mixing.α == 1.0  # Otherwise weird issues ...
+
     model  = basis.model
     n_spin = basis.model.n_spin_components
     dVol   = model.unit_cell_volume / prod(basis.fft_size)
@@ -510,14 +511,11 @@ end
 
     # Initialise iteration state
     # All quantitities without any _out or _next specifier are derived from V == Vin
-    occupation  = nothing
-    eigenvalues = nothing
-    εF          = nothing
-    ρ_prev      = ρ
-    n_iter      = 0
-    converged   = false
-    diagtol     = determine_diagtol(;ρin=ρ_prev, n_iter=n_iter)
-    state       = EVρ(V; diagtol=diagtol, ψ=ψ)
+    ρ_prev    = ρ
+    n_iter    = 0
+    converged = false
+    diagtol   = determine_diagtol((ρin=ρ_prev, n_iter=n_iter))
+    state     = EVρ(V; diagtol=diagtol, ψ=ψ)
 
     get_next = anderson(m=m)
     for i = 1:maxiter
@@ -530,10 +528,13 @@ end
         # TODO A bit hackish for now with the ρout = ρ, ρin=ρ_prev stuff ...
         info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-                ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, stage=:iterate,
+                ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, ρnext=ρ, stage=:iterate,
                 diagonalization=state.diagonalization, converged=converged)
         callback(info)
-        is_converged(info) && (converged = true)
+        if is_converged(info)
+            converged = true
+            break
+        end
 
         # XXX mixing contains an implicit α at the moment
         Pinv_δF = mix(mixing, basis, δF; info...) / mixing.α
@@ -542,9 +543,10 @@ end
         # Determine stepsize and take next step
         α = α_trial
         guess = ψ
+        diagtol = determine_diagtol(merge(info, (n_iter=i + 1, )))
         while true
             Vnext = V + α * δV
-            state_next  = EVρ(Vnext; diagtol=diagtol, guess=guess)
+            state_next  = EVρ(Vnext; diagtol=diagtol, ψ=guess)
             Etotal_next = state_next.energies.total
             ρnext       = state_next.ρout
             ρ_spin_next = state_next.ρ_spin_out
@@ -555,25 +557,27 @@ end
                 println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter")
             end
 
-            if Etotal_next < Etotal || α ≤ α_min || always_accept
+            if Etotal_next - Etotal < 50tol || α ≤ α_min || always_accept
                 # Accept any energy-decreasing step (or if α is already too small)
                 state  = state_next
                 ρ_prev = ρ
+                V = Vnext
                 mpi_master() && println()
                 break
             end
 
             slope, curv = potmix_quadratic_model(basis, α, V, Vout, Vnext, ρ, ρ_spin, ρnext, ρ_spin_next)
 
-            Emodel = Etotal + slope * α + curv * α^2 / 2
-            model_relerror = abs(Etotal_next - Emodel) / abs(Etotal_next - Etotal)
+            Emodel(α) = Etotal + slope * α + curv * α^2 / 2
+            model_relerror = abs(Etotal_next - Emodel(α)) / abs(Etotal_next - Etotal)
 
             if mpi_master()
-                println("        ΔE_pred   = $(Emodel - Etotal)")
+                println("        ΔE_pred   = $(Emodel(α) - Etotal)")
                 println("        relerror  = $model_relerror")
-                println("        slope     = $slope")
-                println("        curv      = $curv")
+                println("        slope     = $slope    (<0)")
+                println("        curv      = $curv     (>0)")
                 println("        αopt      = $(-slope / curv)")
+                println("        ΔE_next   = $(Emodel(-slope / curv) - Etotal)")
             end
 
             modeltol = 0.1  # Relative error in the model, which is acceptable
@@ -604,8 +608,8 @@ end
     Vunpack = [@view V[:, :, :, σ] for σ in 1:n_spin]
     ham  = hamiltonian_with_total_potential(ham, Vunpack)
     info = (ham=ham, basis=basis, energies=energies, converged=converged,
-            ρ=ρ, ρspin=ρspin, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-            n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ, stage=:finalize)
+            ρ=ρ, ρspin=ρspin, eigenvalues=state.eigenvalues, occupation=state.occupation,
+            εF=state.εF, n_iter=n_iter, n_ep_extra=n_ep_extra, ψ=ψ, stage=:finalize)
     callback(info)
     info
 end
