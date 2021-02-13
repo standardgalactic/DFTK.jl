@@ -589,16 +589,15 @@ end
             )
             if reject_model
                 mpi_master() && println("        ---> Rejecting model")
-                α_next = α / 2
-            elseif slope > 0
-                mpi_master() && println("        ---> Uphill slope")
-                α_next = α_min
+                α_next = max(α / 2, α_min)  # Half, but don't undershoot
             else
                 # Use model to get optimal damping
                 α_next = -slope / curv
-                α_next = min(0.95α, -slope / curv)  # to avoid getting stuck
+
+                # Juggle a little with damping to avoid getting stuck
+                α_next = min(0.95α, α_next)
+                α_next = max(α_next, 1e-2)
             end
-            α_next = max(α_next, α_min)  # Don't undershoot
 
             # Adjust guess: Use whatever state is closest
             guess = α_next > α / 2 ? state_next.ψ : ψ
