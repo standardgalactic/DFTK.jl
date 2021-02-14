@@ -80,6 +80,8 @@ function ScfDiagtol(;ratio_ρdiff=0.2, diagtol_min=nothing, diagtol_max=0.03)
         info.n_iter ≤ 1 && return diagtol_max
         info.n_iter == 2 && (diagtol_max /= 5)  # Enforce more accurate Bloch wave
 
+        # TODO It makes more sense to use ρout here as it is a much better
+        #      measure of the SCF being converged.
         diagtol = norm(info.ρnext.fourier - info.ρin.fourier) * ratio_ρdiff
         # TODO Quantum espresso divides diagtol by the number of electrons
         diagtol = min(diagtol_max, diagtol)  # Don't overshoot

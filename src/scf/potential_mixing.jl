@@ -513,10 +513,13 @@ end
     # Initialise iteration state
     # All quantitities without any _out or _next specifier are derived from V == Vin
     ρ_prev    = ρ
-    n_iter    = 0
+    n_iter    = 1
     converged = false
     diagtol   = determine_diagtol((ρin=ρ_prev, n_iter=n_iter))
     state     = EVρ(V; diagtol=diagtol, ψ=ψ)
+
+    diagiter = mpi_mean(mean(state.diagonalization.iterations), basis.comm_kpts)
+    mpi_master() && println("startup:    diag = $diagiter  diagtol = $diagtol")
 
     get_next = anderson(m=m)
     for i = 1:maxiter
@@ -526,10 +529,11 @@ end
         Vout   = cat(Vout..., dims=4)
         δF     = Vout - V
 
-        # TODO A bit hackish for now with the ρout = ρ, ρin=ρ_prev stuff ...
+        # TODO A bit hackish for now with the ρnext = ρout = ρ, ρin=ρ_prev stuff ...
         info = (basis=basis, ham=nothing, n_iter=i, energies=energies,
                 ψ=ψ, eigenvalues=eigenvalues, occupation=occupation, εF=εF,
-                ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, ρnext=ρ, stage=:iterate,
+                ρout=ρ, ρ_spin_out=ρ_spin, ρin=ρ_prev, Vin=V, Vout=Vout, ρnext=ρ,
+                stage=:iterate,
                 diagonalization=state.diagonalization, converged=converged)
         callback(info)
         if is_converged(info)
@@ -541,10 +545,26 @@ end
         Pinv_δF = mix(mixing, basis, δF; info...) / mixing.α
         δV      = get_next(basis, V, Pinv_δF) - V
 
+        # TODO This way of determining diagtol has the issue that if α is very
+        #      small (because we want to damp a bad step) then it can happen that
+        #      the diagtol is tightened (and kept tight in the next iterations) even
+        #      though the SCF is far from being converged.
+        #
+        #      Ideas:
+        #          - Once we adapt the initial α for the upcoming loop, a solution
+        #            could be to keep track of how much the line-search reduced α and "undo" that.
+        #          - Or (better) one could try to use Vout - Vin to determine diagtol, but
+        #            unlike the densities used now, the relationship is unfortunately less clear.
+        #
+        #      Notice:
+        #          - It turns out the guaranteed procedure is very susceptible to
+        #            the convergence (as otherwise the quality of the models becomes bad),
+        #            so one has to be very careful when playing with diagtol.
+        diagtol = determine_diagtol(merge(info, (n_iter=i + 1, )))
+
         # Determine stepsize and take next step
         α = α_trial
         guess = ψ
-        diagtol = determine_diagtol(merge(info, (n_iter=i + 1, )))
         while true
             Vnext = V + α * δV
             state_next  = EVρ(Vnext; diagtol=diagtol, ψ=guess)
@@ -555,10 +575,10 @@ end
             diagiter = mpi_mean(mean(state_next.diagonalization.iterations), basis.comm_kpts)
             if mpi_master()
                 println("    α = $α")
-                println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter")
+                println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter,   diagtol = $diagtol")
             end
 
-            if Etotal_next - Etotal < 10tol || α ≤ α_min || always_accept
+            if Etotal_next - Etotal < tol || α ≤ α_min || always_accept
                 # Accept any energy-decreasing step (or if α is already too small)
                 state  = state_next
                 ρ_prev = ρ
