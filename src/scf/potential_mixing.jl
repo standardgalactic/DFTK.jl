@@ -229,7 +229,7 @@ end
                                   use_guaranteed=false,
                                   # if use_guaranteed:
                                   plotprefix=nothing,
-                                  α_trial=1.0,
+                                  α0=1.0,
                                   α_min=0.05,
                                   α_max=1.5,
                                   )
@@ -380,9 +380,9 @@ end
             δV = get_next(basis, V_prev, Pinv_δF) - V_prev
 
             # How far along the search direction defined by δV do we want to go
-            nextstate = EVρ(V_prev + α_trial * δV; diagtol=diagtol)
+            nextstate = EVρ(V_prev + α0 * δV; diagtol=diagtol)
             ρnext, ρ_spin_next = nextstate.ρout, nextstate.ρ_spin_out
-            αopt, slope, curv = estimate_optimal_step_size(basis, δF, α_trial * δV,
+            αopt, slope, curv = estimate_optimal_step_size(basis, δF, α0 * δV,
                                                            ρout, ρ_spin_out,
                                                            ρnext, ρ_spin_next)
 
@@ -477,16 +477,18 @@ end
                                              mixing=SimpleMixing(α=1.0),
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
-                                             m=10, α_trial=mixing.α, α_min=1 / 32,
-                                             modeltol=0.1,
+                                             m=10, mα=3, n_α0=2,
+                                             α0=mixing.α, α_min=1 / 32, α_max=1.5, modeltol=0.1,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
                                             )
     @assert mixing.α == 1.0  # Otherwise weird issues ...
 
-    model  = basis.model
-    n_spin = basis.model.n_spin_components
-    dVol   = model.unit_cell_volume / prod(basis.fft_size)
+    T = eltype(ρ)
+    epsilon = eps(real(T))
+    model   = basis.model
+    n_spin  = basis.model.n_spin_components
+    dVol    = model.unit_cell_volume / prod(basis.fft_size)
 
     # Initial guess for V and ψ (if none given)
     if ψ !== nothing
@@ -517,6 +519,7 @@ end
     converged = false
     diagtol   = determine_diagtol((ρin=ρ_prev, n_iter=n_iter))
     state     = EVρ(V; diagtol=diagtol, ψ=ψ)
+    dampings  = T[]  # History of previously employed dampings
 
     diagiter = mpi_mean(mean(state.diagonalization.iterations), basis.comm_kpts)
     mpi_master() && println("startup:    diag = $diagiter  diagtol = $diagtol")
@@ -562,8 +565,16 @@ end
         #            so one has to be very careful when playing with diagtol.
         diagtol = determine_diagtol(merge(info, (n_iter=i + 1, )))
 
+        # Initial guess for the stepsize
+        α = α0
+        if length(dampings) > n_α0 && !always_accept
+            c_dampings = dampings[max(n_α0, end-mα):end]  # Sliding damping window
+            α = exp(mean(log.(c_dampings)))  # Build "average" damping factor
+            α = min(α, α_max)
+            α = max(α, α_min)
+        end
+
         # Determine stepsize and take next step
-        α = α_trial
         guess = ψ
         while true
             Vnext = V + α * δV
@@ -572,10 +583,30 @@ end
             ρnext       = state_next.ρout
             ρ_spin_next = state_next.ρ_spin_out
 
+            slope, curv = potmix_quadratic_model(basis, α, V, Vout, Vnext, ρ, ρ_spin, ρnext, ρ_spin_next)
+            Emodel(α) = Etotal + slope * α + curv * α^2 / 2
+            model_relerror = abs(Etotal_next - Emodel(α)) / abs(Etotal_next - Etotal)
+
+            # below this error we even accept uphill steps and super-small dampings
+            mtol_tight = 0.2modeltol
+            reject_model = (
+                   (model_relerror > modeltol)  # Model not trusted
+                || (curv  <  epsilon && slope < -epsilon)  # No stationary point in [0, ∞)
+                || (slope > -epsilon && model_relerror > mtol_tight)  # Uphill slope not trusted
+            )
+
             diagiter = mpi_mean(mean(state_next.diagonalization.iterations), basis.comm_kpts)
-            if mpi_master()
+            if mpi_master() && !always_accept
                 println("    α = $α")
                 println("        ΔE        = $(Etotal_next - Etotal)   diag = $diagiter,   diagtol = $diagtol")
+                println("        ΔE_pred   = $(Emodel(α) - Etotal)")
+                println("        relerror  = $model_relerror")
+                println("        slope     = $slope    (<0)")
+                println("        curv      = $curv     (>0)")
+                println("        αopt      = $(-slope / curv)")
+                println("        ΔE_next   = $(Emodel(-slope / curv) - Etotal)")
+            elseif mpi_master()
+                println("    α = $α    ΔE        = $(Etotal_next - Etotal)   diag = $diagiter,   diagtol = $diagtol")
             end
 
             if Etotal_next - Etotal < tol || α ≤ α_min || always_accept
@@ -583,40 +614,32 @@ end
                 state  = state_next
                 ρ_prev = ρ
                 V = Vnext
+
+                if !reject_model && slope < -epsilon
+                    push!(dampings, -slope / curv)
+                end
                 mpi_master() && println()
                 break
             end
 
-            slope, curv = potmix_quadratic_model(basis, α, V, Vout, Vnext, ρ, ρ_spin, ρnext, ρ_spin_next)
-
-            Emodel(α) = Etotal + slope * α + curv * α^2 / 2
-            model_relerror = abs(Etotal_next - Emodel(α)) / abs(Etotal_next - Etotal)
-
-            if mpi_master()
-                println("        ΔE_pred   = $(Emodel(α) - Etotal)")
-                println("        relerror  = $model_relerror")
-                println("        slope     = $slope    (<0)")
-                println("        curv      = $curv     (>0)")
-                println("        αopt      = $(-slope / curv)")
-                println("        ΔE_next   = $(Emodel(-slope / curv) - Etotal)")
-            end
-
-            # modeltol = 0.1  # Relative error in the model, which is acceptable
-            reject_model = (
-                   curv < 0  # Otherwise stationary point is a maximum
-                || model_relerror > modeltol  # Model not trustworthy
-                || (slope > 0 && model_relerror > 0.2modeltol)  # Uphill slope not trusted
-            )
             if reject_model
                 mpi_master() && println("        ---> Rejecting model")
                 α_next = max(α / 2, α_min)  # Half, but don't undershoot
+            elseif slope > -epsilon
+                # We're going uphill, but our model is trusted, so just take a small step
+                # to give the Anderson the chance to learn something
+                α_next = α_min
             else
                 # Use model to get optimal damping
                 α_next = -slope / curv
 
-                # Juggle a little with damping to avoid getting stuck
+                # Juggle a little to avoid getting stuck
                 α_next = min(0.95α, α_next)
-                α_next = max(α_next, 1e-2)
+                α_next = max(α_next, 1e-3)
+
+                if model_relerror > mtol_tight
+                    α_next = max(α_next, α_min)
+                end
             end
 
             # Adjust guess: Use whatever state is closest
