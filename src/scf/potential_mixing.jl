@@ -477,7 +477,7 @@ end
                                              mixing=SimpleMixing(α=1.0),
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
-                                             m=10, mα=3, n_α0=2,
+                                             m=10, mα=3, n_α_ignored=2,
                                              α0=mixing.α, α_min=1 / 32, α_max=1.5, modeltol=0.1,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
@@ -567,8 +567,8 @@ end
 
         # Initial guess for the stepsize
         α = α0
-        if length(dampings) > n_α0 && !always_accept
-            c_dampings = dampings[max(n_α0, end-mα):end]  # Sliding damping window
+        if length(dampings) > n_α_ignored && !always_accept
+            c_dampings = dampings[max(n_α_ignored, end-mα):end]  # Sliding damping window
             α = exp(mean(log.(c_dampings)))  # Build "average" damping factor
             α = min(α, α_max)
             α = max(α, α_min)
