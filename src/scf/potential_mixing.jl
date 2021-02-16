@@ -477,8 +477,8 @@ end
                                              mixing=SimpleMixing(α=1.0),
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
-                                             m=10, mα=3, n_α_ignored=2,
-                                             α0=mixing.α, α_min=1 / 32, α_max=1.5, modeltol=0.1,
+                                             m=10, mα=5, α0=mixing.α, n_α0=2,
+                                             α_min=α0 / 50, α_max=1.5α0, modeltol=0.1,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
                                             )
@@ -566,16 +566,17 @@ end
         diagtol = determine_diagtol(merge(info, (n_iter=i + 1, )))
 
         # Initial guess for the stepsize
-        α = α0
-        if length(dampings) > n_α_ignored && !always_accept
-            c_dampings = dampings[max(n_α_ignored, end-mα):end]  # Sliding damping window
-            α = exp(mean(log.(c_dampings)))  # Build "average" damping factor
-            α = min(α, α_max)
-            α = max(α, α_min)
+        αguess = α0
+        if length(dampings) > 0 && n_iter > n_α0 && !always_accept
+            c_dampings = dampings[max(1, end-mα):end]  # Sliding damping window
+            αguess = exp(mean(log.(c_dampings)))  # Build "average" damping factor
+            αguess = min(αguess, α_max)
+            αguess = max(αguess, α_min)
         end
 
         # Determine stepsize and take next step
         guess = ψ
+        α = αguess
         while true
             Vnext = V + α * δV
             state_next  = EVρ(Vnext; diagtol=diagtol, ψ=guess)
@@ -587,8 +588,7 @@ end
             Emodel(α) = Etotal + slope * α + curv * α^2 / 2
             model_relerror = abs(Etotal_next - Emodel(α)) / abs(Etotal_next - Etotal)
 
-            # below this error we even accept uphill steps and super-small dampings
-            mtol_tight = 0.2modeltol
+            mtol_tight  = modeltol / 5  # below this error we even accept uphill steps
             reject_model = (
                    (model_relerror > modeltol)  # Model not trusted
                 || (curv  <  epsilon && slope < -epsilon)  # No stationary point in [0, ∞)
@@ -609,14 +609,18 @@ end
                 println("    α = $α    ΔE        = $(Etotal_next - Etotal)   diag = $diagiter,   diagtol = $diagtol")
             end
 
-            if Etotal_next - Etotal < tol || α ≤ α_min || always_accept
+            if Etotal_next - Etotal < tol || abs(α) ≤ α_min || always_accept
                 # Accept any energy-decreasing step (or if α is already too small)
                 state  = state_next
                 ρ_prev = ρ
                 V = Vnext
 
-                if !reject_model && slope < -epsilon
-                    push!(dampings, -slope / curv)
+                if !reject_model
+                    if slope < -epsilon
+                        push!(dampings, abs(-slope / curv))
+                    else  # Uphill slope -> push a small value to decelerate
+                        push!(dampings, abs(αguess / (1 + min(mα, length(dampings)))))
+                    end
                 end
                 mpi_master() && println()
                 break
@@ -624,22 +628,15 @@ end
 
             if reject_model
                 mpi_master() && println("        ---> Rejecting model")
-                α_next = max(α / 2, α_min)  # Half, but don't undershoot
-            elseif slope > -epsilon
-                # We're going uphill, but our model is trusted, so just take a small step
-                # to give the Anderson the chance to learn something
-                α_next = α_min
+                α_next = sign(α) * max(abs(α) / 2, α_min)  # Half, but don't undershoot
             else
-                # Use model to get optimal damping
+                # Use model to get optimal damping (can yield negative or positive damping)
                 α_next = -slope / curv
+                α_sign = sign(α_next)
 
                 # Juggle a little to avoid getting stuck
-                α_next = min(0.95α, α_next)
-                α_next = max(α_next, 1e-3)
-
-                if model_relerror > mtol_tight
-                    α_next = max(α_next, α_min)
-                end
+                α_next = min(0.95abs(α), abs(α_next))
+                α_next = α_sign * max(α_next, α_min)
             end
 
             # Adjust guess: Use whatever state is closest
