@@ -603,6 +603,7 @@ end
                 println("        relerror  = $model_relerror")
                 println("        slope     = $slope    (<0)")
                 println("        curv      = $curv     (>0)")
+                println("        Armijo?   = $(( (Etotal_next - Etotal) ≤ 1e-4 * α * curv ))")  # Constant from Nocedal / wright
                 println("        αopt      = $(-slope / curv)")
                 println("        ΔE_next   = $(Emodel(-slope / curv) - Etotal)")
             elseif mpi_master()
