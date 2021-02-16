@@ -478,7 +478,7 @@ end
                                              is_converged=ScfConvergenceEnergy(tol),
                                              callback=ScfDefaultCallback(),
                                              m=10, mα=3, α0=mixing.α, n_α0=2,
-                                             α_min=α0 / 50, α_max=1.5α0, modeltol=0.1,
+                                             α_min=α0 / 50, α_max=1.5, modeltol=0.1,
                                              # For debugging and to get "standard" algo
                                              always_accept=false
                                             )
