@@ -572,6 +572,10 @@ end
             αguess = exp(mean(log.(c_dampings)))  # Build "average" damping factor
             αguess = min(αguess, α_max)
             αguess = max(αguess, α_min)
+
+            # Don't allow αguess to grow beyond α0 in the first step size chosen
+            # from the damping history.
+            length(dampings) == 1 && (αguess = min(αguess, α0))
         end
 
         # Determine stepsize and take next step
