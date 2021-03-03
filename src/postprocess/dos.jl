@@ -24,7 +24,7 @@ Fermi surface.
 """
 function compute_nos(ε, basis, eigenvalues; smearing=basis.model.smearing,
                      temperature=basis.model.temperature)
-    D = zeros(typeof(ε), basis.model.n_spin_components)
+    N = zeros(typeof(ε), basis.model.n_spin_components)
     if (temperature == 0) || smearing isa Smearing.None
         error("compute_nos only supports finite temperature")
     end

@@ -103,11 +103,11 @@ total_density(ρ) = dropdims(sum(ρ; dims=4); dims=4)
     if size(ρ, 4) == 2
         ρ[:, :, :, 1] - ρ[:, :, :, 2]
     else
-        0*ρ[:, :, :]
+        zero(ρ[:, :, :])
     end
 end
 
-function ρ_from_total_and_spin(ρtot, ρspin)
+function ρ_from_total_and_spin(ρtot, ρspin=nothing)
     n_spin = ρspin === nothing ? 1 : 2
     ρ = similar(ρtot, size(ρtot)..., n_spin)
     if n_spin == 1

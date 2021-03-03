@@ -80,7 +80,8 @@ loaded.energies
 # callback to [`self_consistent_field`](@ref), for example:
 
 callback = DFTK.ScfSaveCheckpoints()
-scfres = self_consistent_field(basis; ρ=guess_density(basis, magnetic_moments), tol=1e-2, callback=callback);
+scfres = self_consistent_field(basis; ρ=guess_density(basis, magnetic_moments),
+                               tol=1e-2, callback=callback);
 
 # Notice that using this callback makes the SCF go silent since the passed
 # callback parameter overwrites the default value (namely `DefaultScfCallback()`)
@@ -88,7 +89,8 @@ scfres = self_consistent_field(basis; ρ=guess_density(basis, magnetic_moments),
 # If you want to have both (printing and checkpointing) you need to chain
 # both callbacks:
 callback = DFTK.ScfDefaultCallback() ∘ DFTK.ScfSaveCheckpoints(keep=true)
-scfres = self_consistent_field(basis; ρ=guess_density(basis, magnetic_moments), tol=1e-2, callback=callback);
+scfres = self_consistent_field(basis; ρ=guess_density(basis, magnetic_moments),
+                               tol=1e-2, callback=callback);
 
 # For more details on using callbacks with DFTK's `self_consistent_field` function
 # see [Monitoring self-consistent field calculations](@ref).

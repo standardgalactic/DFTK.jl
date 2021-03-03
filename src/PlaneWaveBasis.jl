@@ -13,7 +13,7 @@ More generally, a kpoint is a block of the Hamiltonian;
 eg collinear spin is treated by doubling the number of kpoints.
 """
 struct Kpoint{T <: Real}
-    model::Model{T}
+    model::Model{T}               # TODO Should be only lattice/atoms
     spin::Int                     # Spin component can be 1 or 2 as index into what is
                                   # returned by the `spin_components` function
     coordinate::Vec3{T}           # Fractional coordinate of k-Point
@@ -408,6 +408,7 @@ function G_to_r(basis::PlaneWaveBasis, f_fourier::AbstractArray; assume_real=tru
     # assume_real is true by default because this is the most common usage
     # (for densities & potentials)
     f_real = similar(f_fourier)
+    @assert length(size(f_fourier)) ∈ (3, 4)
     # this exploits trailing index convention
     for iσ = 1:size(f_fourier, 4)
         @views G_to_r!(f_real[:, :, :, iσ], basis, f_fourier[:, :, :, iσ])
@@ -427,7 +428,7 @@ NOTE: If `kpt` is given, not only `f_fourier` but also `f_real` is overwritten.
 """
 @timing_seq function r_to_G!(f_fourier::AbstractArray3, basis::PlaneWaveBasis,
                              f_real::AbstractArray3)
-    if eltype(f_real) != complex(eltype(f_real))
+    if !isreal(f_real)
         f_real = complex.(f_real)
     end
     mul!(f_fourier, basis.opFFT, f_real)
@@ -454,6 +455,7 @@ spherical basis set.
 """
 function r_to_G(basis::PlaneWaveBasis, f_real::AbstractArray)
     f_fourier = similar(f_real, complex(eltype(f_real)))
+    @assert length(size(f_real)) ∈ (3, 4)
     # this exploits trailing index convention
     for iσ = 1:size(f_real, 4)
         @views r_to_G!(f_fourier[:, :, :, iσ], basis, f_real[:, :, :, iσ])

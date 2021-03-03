@@ -14,12 +14,7 @@ function guess_density(basis::PlaneWaveBasis, magnetic_moments=[])
     guess_density(basis, basis.model.atoms, magnetic_moments)
 end
 @timing function guess_density(basis::PlaneWaveBasis{T}, atoms, magnetic_moments) where {T}
-    # build ρtot
-    gaussians_tot = [(T(n_elec_valence(spec)), T(atom_decay_length(spec)), pos)
-                     for (spec, positions) in atoms for pos in positions]
-    ρtot = gaussian_superposition(basis, gaussians_tot)
-
-    ρ = zeros(T, basis.fft_size..., basis.model.n_spin_components)
+    ρtot = _guess_total_density(basis, atoms)
     if basis.model.n_spin_components == 1
         ρspin = nothing
     else
@@ -27,6 +22,13 @@ end
     end
 
     ρ_from_total_and_spin(ρtot, ρspin)
+end
+
+function _guess_total_density(basis::PlaneWaveBasis{T}, atoms)
+    # build ρtot
+    gaussians_tot = [(T(n_elec_valence(spec)), T(atom_decay_length(spec)), pos)
+                     for (spec, positions) in atoms for pos in positions]
+    ρtot = gaussian_superposition(basis, gaussians_tot)
 end
 
 function _guess_spin_density(basis::PlaneWaveBasis{T}, atoms, magnetic_moments) where {T}
