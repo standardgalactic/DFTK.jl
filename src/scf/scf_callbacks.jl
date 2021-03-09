@@ -24,10 +24,10 @@ function ScfDefaultCallback()
             @printf "---   ---------------   ---------   --------%s   ----\n" magn[2]
         end
         E    = isnothing(info.energies) ? Inf : info.energies.total
-        Δρ   = norm(info.ρout - info.ρin) * sqrt(info.basis.integration_factor)
+        Δρ   = norm(info.ρout - info.ρin) * sqrt(info.basis.dvol)
         magn = size(info.ρout, 4) == 1 ?
             NaN :
-            sum(spin_density(info.ρout)) * info.basis.integration_factor
+            sum(spin_density(info.ρout)) * info.basis.dvol
 
         Estr   = (@sprintf "%+15.12f" round(E, sigdigits=13))[1:15]
         prev_E = prev_energies === nothing ? Inf : prev_energies.total
@@ -52,7 +52,7 @@ function ScfConvergenceEnergy(tolerance)
         info.energies === nothing && return false # first iteration
 
         # The ρ change should also be small, otherwise we converge if the SCF is just stuck
-        if norm(info.ρout - info.ρin) * sqrt(info.basis.integration_factor) > 10sqrt(tolerance)
+        if norm(info.ρout - info.ρin) * sqrt(info.basis.dvol) > 10sqrt(tolerance)
             return false
         end
 
@@ -69,7 +69,7 @@ input density and unpreconditioned output density (ρout)
 """
 function ScfConvergenceDensity(tolerance)
     function f(info)
-        norm(info.ρout - info.ρin) * sqrt(info.basis.integration_factor) < tolerance
+        norm(info.ρout - info.ρin) * sqrt(info.basis.dvol) < tolerance
     end
     f
 end
@@ -87,7 +87,7 @@ function ScfDiagtol(;ratio_ρdiff=0.2, diagtol_min=nothing, diagtol_max=0.03)
         info.n_iter == 2 && (diagtol_max /= 5)  # Enforce more accurate Bloch wave
 
         diagtol = (norm(info.ρnext - info.ρin)
-                   * sqrt(info.basis.integration_factor)
+                   * sqrt(info.basis.dvol)
                    * ratio_ρdiff)
         # TODO Quantum espresso divides diagtol by the number of electrons
         diagtol = clamp(diagtol, diagtol_min, diagtol_max)

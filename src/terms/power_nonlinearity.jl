@@ -16,7 +16,7 @@ end
 function ene_ops(term::TermPowerNonlinearity, ψ, occ; ρ, kwargs...)
     basis = term.basis
 
-    E = term.C * sum(ρ .^ term.α) * term.basis.integration_factor
+    E = term.C * sum(ρ .^ term.α) * term.basis.dvol
     potential = @. term.C * term.α * ρ^(term.α-1)
 
     # In the case of collinear spin, the potential is spin-dependent

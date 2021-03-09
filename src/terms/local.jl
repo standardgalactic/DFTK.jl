@@ -14,7 +14,7 @@ abstract type TermLocalPotential <: Term end
     ops = [RealSpaceMultiplication(basis, kpoint, potview(term.potential, kpoint.spin))
            for kpoint in basis.kpoints]
     if :ρ in keys(kwargs)
-        E = sum(total_density(kwargs[:ρ]) .* term.potential) * term.basis.integration_factor
+        E = sum(total_density(kwargs[:ρ]) .* term.potential) * term.basis.dvol
     else
         E = T(Inf)
     end

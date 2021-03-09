@@ -58,7 +58,7 @@ end
         terms = evaluate(xc, density; zk=zk)
 
         # Add energy contribution
-        E += sum(terms.zk .* ρ) * term.basis.integration_factor
+        E += sum(terms.zk .* ρ) * term.basis.dvol
 
         # Add potential contributions Vρ -2 ∇⋅(Vσ ∇ρ)
         for σ in 1:n_spin

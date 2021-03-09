@@ -77,11 +77,11 @@ function compute_χ0(ham; droptol=0, temperature=ham.basis.model.temperature)
             ddiff = Smearing.occupation_divided_difference
             ratio = filled_occ * ddiff(model.smearing, E[m], E[n], εF, temperature)
             (n != m) && (abs(ratio) < droptol) && continue
-            # integration_factor because inner products have a integration_factor in them
+            # dvol because inner products have a dvol in them
             # so that the dual gets one
             # can take the real part here because the nm term is complex conjugate of mn
             # TODO optimize this a bit... use symmetry nm, reduce allocs, etc.
-            factor = basis.kweights[ik] * ratio * basis.integration_factor
+            factor = basis.kweights[ik] * ratio * basis.dvol
 
             @views χ0σσ .+= factor .* real(conj((Vr[:, m] .* Vr[:, m]'))
                                            .*   (Vr[:, n] .* Vr[:, n]'))
@@ -93,7 +93,7 @@ function compute_χ0(ham; droptol=0, temperature=ham.basis.model.temperature)
     if temperature > 0
         dos  = compute_dos(εF, basis, Es)
         ldos = compute_ldos(εF, basis, Es, Vs)
-        χ0 .+= vec(ldos) .* vec(ldos)' .* basis.integration_factor ./ sum(dos)
+        χ0 .+= vec(ldos) .* vec(ldos)' .* basis.dvol ./ sum(dos)
     end
     χ0
 end
@@ -200,7 +200,7 @@ returns `3` extra bands, which are not converged by the eigensolver
         ldos = compute_ldos(εF, basis, eigenvalues, ψ, temperature=temperature)
         dos  = compute_dos(εF, basis, eigenvalues, temperature=temperature)
 
-        δρ .+= ldos .* dot(ldos, δV) .* basis.integration_factor ./ sum(dos)
+        δρ .+= ldos .* dot(ldos, δV) .* basis.dvol ./ sum(dos)
     end
     δρ .* normδV
 end
@@ -240,7 +240,7 @@ function add_response_from_band!(δρk, n, hamk, εk, ψk, εF, δV,
         ψmk_real = G_to_r(basis, hamk.kpoint, @view ψk[:, m])
         # ∑_{n,m != n} (fn-fm)/(εn-εm) ρnm <ρmn|δV>
         ρnm = conj(ψnk_real) .* ψmk_real
-        weight = basis.integration_factor * dot(ρnm, δV)
+        weight = basis.dvol * dot(ρnm, δV)
         δρk .+= (n == m ? 1 : 2) * real(ratio .* weight .* ρnm)
     end
 
