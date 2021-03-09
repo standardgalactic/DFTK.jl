@@ -32,7 +32,7 @@ function test_scfres_agreement(tested, ref)
     @test tested.eigenvalues    == ref.eigenvalues
     @test tested.occupation     == ref.occupation
     @test tested.ψ              == ref.ψ
-    @test tested.ρ         ≈  ref.ρ     rtol=1e-14
+    @test tested.ρ              ≈  ref.ρ     rtol=1e-14
 end
 
 
