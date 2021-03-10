@@ -271,16 +271,10 @@ function LibxcDensity(basis, max_derivative::Integer, ρ)
     ∇ρ_real   = nothing
 
     # compute ρ_real and possibly ρ_fourier
-    ρ_real = similar(ρ, n_spin, basis.fft_size...)
-    for σ = 1:n_spin
-        ρ_real[σ, :, :, :] = ρ[:, :, :, σ]
-    end
+    ρ_real = permutedims(ρ, (4, 1, 2, 3)) # ρ[x, y, z, σ] -> ρ_real[σ, x, y, z]
     if max_derivative > 0
         ρf = r_to_G(basis, ρ)
-        ρ_fourier = similar(ρf, n_spin, basis.fft_size...)
-        for σ = 1:n_spin
-            ρ_fourier[σ, :, :, :] = ρf[:, :, :, σ]
-        end
+        ρ_fourier = permutedims(ρf, (4, 1, 2, 3)) # ρ_fourier[σ, x, y, z]
     end
 
     # compute ∇ρ and σ

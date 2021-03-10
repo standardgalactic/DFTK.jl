@@ -78,7 +78,7 @@ function compute_χ0(ham; droptol=0, temperature=ham.basis.model.temperature)
             ratio = filled_occ * ddiff(model.smearing, E[m], E[n], εF, temperature)
             (n != m) && (abs(ratio) < droptol) && continue
             # dvol because inner products have a dvol in them
-            # so that the dual gets one
+            # so that the dual gets one : |f> -> <dvol f|
             # can take the real part here because the nm term is complex conjugate of mn
             # TODO optimize this a bit... use symmetry nm, reduce allocs, etc.
             factor = basis.kweights[ik] * ratio * basis.dvol
