@@ -117,14 +117,12 @@ function compute_kernel(term::TermXc; ρ, kwargs...)
         Kβα = Kαβ
         Kββ = @view kernel[3, :, :, :]
 
-        K = fac .* [Diagonal(vec(Kαα)) Diagonal(vec(Kαβ));
-                    Diagonal(vec(Kβα)) Diagonal(vec(Kββ))]
-        reshape(K, 2*prod(term.basis.fft_size), 2*prod(term.basis.fft_size))
+        fac .* [Diagonal(vec(Kαα)) Diagonal(vec(Kαβ));
+                Diagonal(vec(Kβα)) Diagonal(vec(Kββ))]
     end
 end
 
-function apply_kernel(term::TermXc, dρ;
-                      ρ, kwargs...)
+function apply_kernel(term::TermXc, dρ; ρ, kwargs...)
     basis  = term.basis
     T      = eltype(basis)
     n_spin = basis.model.n_spin_components
@@ -312,7 +310,7 @@ function LibxcDensity(basis, max_derivative::Integer, ρ)
     LibxcDensity(basis, max_derivative, ρ_real, ∇ρ_real, σ_real)
 end
 
-# See libxc documentation
+# See Libxc.jl API
 function Libxc.evaluate(xc::Functional, density::LibxcDensity; kwargs...)
     if xc.family == :lda
         evaluate(xc; rho=density.ρ_real, kwargs...)

@@ -42,7 +42,7 @@ function compute_nos(ε, basis, eigenvalues; smearing=basis.model.smearing,
         n_symeqk = length(basis.ksymops[ik])  # Number of symmetry-equivalent k-Points
         for (iband, εnk) in enumerate(eigenvalues[ik])
             enred = (εnk - ε) / temperature
-            N -= n_symeqk * Smearing.occupation_derivative(smearing, enred)
+            N[σ] -= n_symeqk * Smearing.occupation_derivative(smearing, enred)
         end
     end
     N = mpi_sum(N, basis.comm_kpts)

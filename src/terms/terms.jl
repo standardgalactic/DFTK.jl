@@ -137,7 +137,8 @@ compute_kernel(::Term; kwargs...) = nothing  # By default no kernel
 """
     apply_kernel(basis::PlaneWaveBasis, dρ; kwargs...)
 
-Computes the potential response to a perturbation dρ in real space.
+Computes the potential response to a perturbation dρ in real space,
+as a 4D (i,j,k,σ) array.
 """
 @timing function apply_kernel(basis::PlaneWaveBasis, dρ;
                               RPA=false, kwargs...)

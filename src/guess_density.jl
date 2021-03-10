@@ -25,7 +25,7 @@ end
     ρ_from_total_and_spin(ρtot, ρspin)
 end
 
-function _guess_total_density(basis::PlaneWaveBasis{T}, atoms)
+function _guess_total_density(basis::PlaneWaveBasis{T}, atoms) where {T}
     # build ρtot
     gaussians_tot = [(T(n_elec_valence(spec)), T(atom_decay_length(spec)), pos)
                      for (spec, positions) in atoms for pos in positions]

@@ -201,12 +201,13 @@ end
         vec(Jδρ)
     end
 
-    δF .-= mean(δF)
+    DC_δF = mean(δF)
+    δF .-= DC_δF
     J = LinearMap(Jop, length(δF))
     # TODO Further improvement: Adapt tolerance of gmres to norm(ρ_out - ρ_in)
     x = gmres(J, vec(δF), verbose=mixing.verbose)
     δρ = T(mixing.α) .* devec(x)  # Apply damping
     # Set DC from δF
-    δρ .+= mean(δF)
+    δρ .+= DC_δF
     δρ
 end

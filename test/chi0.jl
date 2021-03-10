@@ -64,6 +64,13 @@ function test_chi0(;symmetry=false, use_symmetry=false, temperature=0,
         diff_applied_χ0 = apply_χ0(ham0, Vs, εF, Es, dV; droptol=0)
         @test norm(diff_findiff - diff_applied_χ0) < testtol
 
+        # just to cover it here
+        if temperature > 0
+            N = compute_nos(εF, basis, Es)
+            D = compute_dos(εF, basis, Es)
+            LDOS = compute_ldos(εF, basis, Es, Vs)
+        end
+
         if !symmetry
             # Test compute_χ0 against finite differences
             χ0 = compute_χ0(ham0)

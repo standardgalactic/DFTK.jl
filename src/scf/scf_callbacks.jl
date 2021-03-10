@@ -25,9 +25,11 @@ function ScfDefaultCallback()
         end
         E    = isnothing(info.energies) ? Inf : info.energies.total
         Δρ   = norm(info.ρout - info.ρin) * sqrt(info.basis.dvol)
-        magn = size(info.ρout, 4) == 1 ?
-            NaN :
-            sum(spin_density(info.ρout)) * info.basis.dvol
+        if size(info.ρout, 4) == 1
+            magn = NaN
+        else
+            magn = sum(spin_density(info.ρout)) * info.basis.dvol
+        end
 
         Estr   = (@sprintf "%+15.12f" round(E, sigdigits=13))[1:15]
         prev_E = prev_energies === nothing ? Inf : prev_energies.total
@@ -68,10 +70,7 @@ Flag convergence by using the L2Norm of the change between
 input density and unpreconditioned output density (ρout)
 """
 function ScfConvergenceDensity(tolerance)
-    function f(info)
-        norm(info.ρout - info.ρin) * sqrt(info.basis.dvol) < tolerance
-    end
-    f
+    info -> (norm(info.ρout - info.ρin) * sqrt(info.basis.dvol) < tolerance)
 end
 
 """

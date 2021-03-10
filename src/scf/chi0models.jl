@@ -25,11 +25,10 @@ function (::LdosModel)(basis; eigenvalues, ψ, εF, kwargs...)
         return nothing
     end
 
-    dos = sum(sum, ldos) * basis.dvol
+    tdos = sum(sum, ldos) * basis.dvol
     function apply!(δρ, δV, α=1)
         δεF = dot(ldos, δV) .* basis.dvol
-        δρ .+= α .* (-ldos .* δV
-                     .+ ldos .* δεF ./ dos)
+        δρ .+= α .* (-ldos .* δV .+ ldos .* δεF ./ tdos)
     end
 end
 

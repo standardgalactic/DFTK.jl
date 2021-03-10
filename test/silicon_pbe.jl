@@ -28,8 +28,7 @@ function run_silicon_pbe(T ;Ecut=5, grid_size=15, spin_polarization=:none, kwarg
 
     spin_polarization == :collinear && (ref_pbe = vcat(ref_pbe, ref_pbe))
     run_scf_and_compare(T, basis, ref_pbe, ref_etot;
-                        ρ=guess_density(basis),
-                        kwargs...)
+                        ρ=guess_density(basis), kwargs...)
 end
 
 

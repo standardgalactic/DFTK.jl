@@ -24,6 +24,7 @@ scfres = self_consistent_field(basis, tol=1e-14)
 function eps_fun(dρ)
     dv = apply_kernel(basis, dρ; ρ=scfres.ρ)
     χdv = apply_χ0(scfres.ham, scfres.ψ, scfres.εF, scfres.eigenvalues, dv)
+    dρ - χdv
 end
 
 # eager diagonalizes the subspace matrix at each iteration

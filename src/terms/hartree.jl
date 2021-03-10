@@ -54,13 +54,11 @@ function compute_kernel(term::TermHartree; kwargs...)
     K = real(G_to_r_matrix(term.basis) * Diagonal(vec(vc_G)) * r_to_G_matrix(term.basis))
 
     n_spin = term.basis.model.n_spin_components
-    n_spin == 1 ? K : reshape([K K; K K], n_spin*length(vc_G), n_spin*length(vc_G))
+    n_spin == 1 ? K : [K K; K K]
 end
 
 function apply_kernel(term::TermHartree, dρ; kwargs...)
     @assert term.basis.model.spin_polarization in (:none, :spinless, :collinear)
     dρtot = total_density(dρ)
-    dVσ = G_to_r(term.basis, term.poisson_green_coeffs .* r_to_G(term.basis, dρtot))
-    dV = similar(dρ)
-    dV .= dVσ
+    G_to_r(term.basis, term.poisson_green_coeffs .* r_to_G(term.basis, dρtot))
 end
